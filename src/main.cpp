@@ -15,6 +15,9 @@
 
 #include "driver/pcnt.h"
 
+#include <PN532_HSU.h>
+#include <PN532.h>
+
 // ================= Robot Parameters and Pins =================
 #define WHEEL_RADIUS 0.045   // meters
 #define TRACK_WIDTH  0.45    // meters
@@ -35,14 +38,14 @@
 #define right_motor_encA 32 // main board 39
 #define right_motor_encB 33 // main board 26
 
-
-// ================= micro-ROS & ROS2 Globals =================
+// ======================== UART Pins ============================
 #define RPi_RX 16
 #define RPi_TX 17
 
 #define RFID_RX 16 // update these
 #define RFID_TX 17
 
+// ================= micro-ROS & ROS2 Globals =====================
 #define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){error_loop();}}
 #define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){}}
 
@@ -62,6 +65,9 @@ rcl_subscription_t subscriber;
 geometry_msgs__msg__Twist cmd_vel_msg;
 rclc_executor_t executor_sub;
 
+PN532_HSU pn532hsu(Serial1);
+PN532 nfc(pn532hsu);
+
 // odometry and ecoder global variables
 volatile long left_ticks = 0;
 volatile long right_ticks = 0;
@@ -79,7 +85,9 @@ unsigned long last_time = 0;
 pcnt_unit_t pcnt_unit_left = PCNT_UNIT_0;  // Left motor
 pcnt_unit_t pcnt_unit_right = PCNT_UNIT_1; // Right motor
 
-// ================= Utility Functions =================
+// RFID
+
+// ================= Utility Functions for Micro-ROS =================
 
 // Error loop if init fails
 void error_loop() {
@@ -243,8 +251,9 @@ void cmd_vel_callback(const void * msgin)
   Serial.printf("PWM -> left: %d, right: %d\n", left_pwm, right_pwm);
 }
 
-// ================= Setup & Loop =================
+// ================= Setup =================
 void setup() {
+  // -------------------- Initialization ---------------------
   // Setup motor pins
   pinMode(left_motor_pwm_pin, OUTPUT);
   pinMode(left_motor_dir_pin_1, OUTPUT);
@@ -267,15 +276,33 @@ void setup() {
 
   // Start serial for debugging
   Serial.begin(115200);
+  
+  // Start RPi Serial
   Serial2.begin(115200, SERIAL_8N1, RPi_RX, RPi_TX);
+  
+  // Start RFID Serial
+  nfc.begin();
+
   delay(2000);
 
-  Serial.println("before micro-ros");
+  uint32_t versiondata = nfc.getFirmwareVersion();
+  if (! versiondata) {
+    Serial.print("Didn't find PN53x board");
+    while (1); // halt
+  }
+
+  // Got ok data, print it out!
+  Serial.print("Found chip PN5"); Serial.println((versiondata>>24) & 0xFF, HEX); 
+  Serial.print("Firmware ver. "); Serial.print((versiondata>>16) & 0xFF, DEC); 
+  Serial.print('.'); Serial.println((versiondata>>8) & 0xFF, DEC);
+  
+  // configure board to read RFID tags
+  nfc.SAMConfig();
+  // RFID Will now be ready to read at anytime
+  Serial.println("RFID is now initialized, configured, and ready to read!");
 
   // Set micro-ROS transport (UART via Serial2)
   set_microros_serial_transports(Serial2);
-
-  Serial.println("set micro-ros transport");
 
   allocator = rcl_get_default_allocator();
 
@@ -284,14 +311,10 @@ void setup() {
     error_loop();
   }
 
-  Serial.println("Initialize micro-ROS support");
-
   // Create node
   if (rclc_node_init_default(&node, "esp32_node", "", &support) != RCL_RET_OK) {
     error_loop();
   }
-
-  Serial.println("Create node");
 
   // Create subscriber to /cmd_vel
   if (rclc_subscription_init_default(
@@ -302,16 +325,12 @@ void setup() {
     error_loop();
   }
 
-  Serial.println("Create Subscriber");
-
   // create publisher 
   RCCHECK(rclc_publisher_init_default(
     &publisher,
     &node,
     ROSIDL_GET_MSG_TYPE_SUPPORT(nav_msgs, msg, Odometry),
     "micro_ros_odom_publisher"));
-
-    Serial.println("create publisher");
 
   // create timer,
   const unsigned int timer_timeout = 1000;
@@ -321,23 +340,17 @@ void setup() {
     RCL_MS_TO_NS(timer_timeout),
     timer_callback));
 
-    Serial.println("create timer");
-
   // Create subscriber executor and add subscriber
   executor_sub = rclc_executor_get_zero_initialized_executor();
   RCCHECK(rclc_executor_init(&executor_sub, &support.context, 1, &allocator));
   RCCHECK(rclc_executor_add_subscription(&executor_sub, &subscriber, &cmd_vel_msg, &cmd_vel_callback, ON_NEW_DATA));
 
-  Serial.println("created subscriber");
-
   // create publisher executor and add timer
   RCCHECK(rclc_executor_init(&executor_pub, &support.context, 1, &allocator));
   RCCHECK(rclc_executor_add_timer(&executor_pub, &timer));
 
-  Serial.println("created publisher");
-
   msg.data = 0;
-  Serial.println("ESP32 Differential Drive Node Ready!");
+  Serial.println("Micro-ROS Connection Complete!");
   delay(10);
 }
 
