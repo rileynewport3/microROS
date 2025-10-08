@@ -37,8 +37,11 @@
 
 
 // ================= micro-ROS & ROS2 Globals =================
-#define RXD2 16
-#define TXD2 17
+#define RPi_RX 16
+#define RPi_TX 17
+
+#define RFID_RX 16 // update these
+#define RFID_TX 17
 
 #define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){error_loop();}}
 #define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){}}
@@ -264,7 +267,7 @@ void setup() {
 
   // Start serial for debugging
   Serial.begin(115200);
-  Serial2.begin(115200, SERIAL_8N1, RXD2, TXD2);
+  Serial2.begin(115200, SERIAL_8N1, RPi_RX, RPi_TX);
   delay(2000);
 
   Serial.println("before micro-ros");
