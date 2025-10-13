@@ -2,21 +2,30 @@
 #include <Arduino.h>
 #include <micro_ros_platformio.h>
 
+// micro-ros
 #include <rcl/rcl.h>
 #include <rcl/error_handling.h>
 #include <rclc/rclc.h>
 #include <rclc/executor.h>
 
 #include <geometry_msgs/msg/twist.h> // subscriber
-#include <nav_msgs/msg/odometry.h> // publisher
+#include <nav_msgs/msg/odometry.h> // publisher for wheel encoders
+#include <sensor_msgs/msg/imu.h> // publisher for imu
 #include <std_msgs/msg/int32.h>
 
 #include <rosidl_runtime_c/string_functions.h>
 
+// pulse counter for motor encoders
 #include "driver/pcnt.h"
 
+// RIFD
 #include <PN532_HSU.h>
 #include <PN532.h>
+
+// IMU
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
+#include <Wire.h>
 
 // ================= Robot Parameters and Pins =================
 #define WHEEL_RADIUS 0.045   // meters
@@ -42,8 +51,12 @@
 #define RPi_RX 16
 #define RPi_TX 17
 
-#define RFID_RX 16 // update these
-#define RFID_TX 17
+#define RFID_RX 4
+#define RFID_TX 27
+
+// IMU pins
+// SCL 22
+// SDA 21
 
 // ================= micro-ROS & ROS2 Globals =====================
 #define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){error_loop();}}
@@ -54,19 +67,20 @@ rclc_support_t support;
 rcl_allocator_t allocator;
 
 // publisher
-rcl_publisher_t publisher;
+rcl_publisher_t publisher_odom;
+rcl_publisher_t publisher_imu;
 nav_msgs__msg__Odometry odom_msg;
+sensor_msgs__msg__Imu imu_msg;
 std_msgs__msg__Int32 msg;
-rclc_executor_t executor_pub;
-rcl_timer_t timer;
+rclc_executor_t executor_pub_odom;
+rclc_executor_t executor_pub_imu;
+rcl_timer_t odom_timer;
+rcl_timer_t imu_timer;
 
 // subscriber
 rcl_subscription_t subscriber;
 geometry_msgs__msg__Twist cmd_vel_msg;
 rclc_executor_t executor_sub;
-
-PN532_HSU pn532hsu(Serial1);
-PN532 nfc(pn532hsu);
 
 // odometry and ecoder global variables
 volatile long left_ticks = 0;
@@ -86,6 +100,11 @@ pcnt_unit_t pcnt_unit_left = PCNT_UNIT_0;  // Left motor
 pcnt_unit_t pcnt_unit_right = PCNT_UNIT_1; // Right motor
 
 // RFID
+PN532_HSU pn532hsu(Serial1);
+PN532 nfc(pn532hsu);
+
+// IMU
+Adafruit_MPU6050 mpu;
 
 // ================= Utility Functions for Micro-ROS =================
 
@@ -141,8 +160,8 @@ void computeOdometry() {
   else if (theta < -PI) theta += 2 * PI;
 }
 
-// ================= Publisher Callback =================
-void timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
+// ================= ODOM Publisher Callback =================
+void odom_timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
   RCLC_UNUSED(last_call_time);
 
   computeOdometry();
@@ -168,12 +187,42 @@ void timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
   odom_msg.twist.twist.angular.z = angular;
 
   // Publish
-  RCCHECK(rcl_publish(&publisher, &odom_msg, NULL));
+  RCCHECK(rcl_publish(&publisher_odom, &odom_msg, NULL));
 
   // if (timer != NULL) {
   //   RCSOFTCHECK(rcl_publish(&publisher, &msg, NULL));
   //   msg.data++;
   // }
+}
+
+// ================= IMU Publisher Callback =================
+void imu_timer_callback(rcl_timer_t * timer, int64_t last_call_time)
+{
+  RCLC_UNUSED(last_call_time);
+
+  // --- header ---
+  uint64_t now_ms = rmw_uros_epoch_millis();
+  imu_msg.header.stamp.sec = now_ms / 1000;
+  imu_msg.header.stamp.nanosec = (now_ms % 1000) * 1000000;
+  rosidl_runtime_c__String__assign(&imu_msg.header.frame_id, "imu");
+
+  // --- Get new sensor events with the readings ---
+  sensors_event_t a, g, temp;
+  mpu.getEvent(&a, &g, &temp);
+
+  // --- fill angular velocity ---
+  imu_msg.angular_velocity.x = g.gyro.x;
+  imu_msg.angular_velocity.y = g.gyro.y;
+  imu_msg.angular_velocity.z = g.gyro.z;
+
+  // --- fill linear acceleration ---
+  imu_msg.linear_acceleration.x = a.acceleration.x;
+  imu_msg.linear_acceleration.y = a.acceleration.y;
+  imu_msg.linear_acceleration.z = a.acceleration.z;
+
+  // --- Publish ---
+  RCCHECK(rcl_publish(&publisher_imu, &imu_msg, NULL));
+
 }
 
 // setupEncoder for pcnt
@@ -251,9 +300,138 @@ void cmd_vel_callback(const void * msgin)
   Serial.printf("PWM -> left: %d, right: %d\n", left_pwm, right_pwm);
 }
 
-// ================= Setup =================
+void rfidInitalize()
+{
+  nfc.begin();
+
+  delay(2000);
+
+  uint32_t versiondata = nfc.getFirmwareVersion();
+  if (! versiondata) {
+    Serial.print("Didn't find PN53x board");
+    while (1); // halt
+  }
+
+  // Got ok data, print it out!
+  Serial.print("Found chip PN5"); Serial.println((versiondata>>24) & 0xFF, HEX); 
+  Serial.print("Firmware ver. "); Serial.print((versiondata>>16) & 0xFF, DEC); 
+  Serial.print('.'); Serial.println((versiondata>>8) & 0xFF, DEC);
+  
+  // configure board to read RFID tags
+  nfc.SAMConfig();
+  // RFID Will now be ready to read at anytime
+  Serial.println("RFID is now initialized, configured, and ready to read!");
+}
+
+void imuStats() 
+{
+  /* Get new sensor events with the readings */
+  sensors_event_t a, g, temp;
+  mpu.getEvent(&a, &g, &temp);
+
+  /* Print out the values */
+  Serial.print("Acceleration X: ");
+  Serial.print(a.acceleration.x);
+  Serial.print(", Y: ");
+  Serial.print(a.acceleration.y);
+  Serial.print(", Z: ");
+  Serial.print(a.acceleration.z);
+  Serial.println(" m/s^2");
+
+  Serial.print("Rotation X: ");
+  Serial.print(g.gyro.x);
+  Serial.print(", Y: ");
+  Serial.print(g.gyro.y);
+  Serial.print(", Z: ");
+  Serial.print(g.gyro.z);
+  Serial.println(" rad/s");
+
+  Serial.print("Temperature: ");
+  Serial.print(temp.temperature);
+  Serial.println(" degC");
+
+  Serial.println("");
+  delay(500);
+}
+
+void imuInitialize()
+{
+  Serial.println("Adafruit MPU6050 test!");
+
+  // Try to initialize!
+  if (!mpu.begin()) {
+    Serial.println("Failed to find MPU6050 chip");
+    while (1) {
+      delay(10);
+    }
+  }
+  Serial.println("MPU6050 Found!");
+
+  mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
+  Serial.print("Accelerometer range set to: ");
+  switch (mpu.getAccelerometerRange()) {
+  case MPU6050_RANGE_2_G:
+    Serial.println("+-2G");
+    break;
+  case MPU6050_RANGE_4_G:
+    Serial.println("+-4G");
+    break;
+  case MPU6050_RANGE_8_G:
+    Serial.println("+-8G");
+    break;
+  case MPU6050_RANGE_16_G:
+    Serial.println("+-16G");
+    break;
+  }
+  mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+  Serial.print("Gyro range set to: ");
+  switch (mpu.getGyroRange()) {
+  case MPU6050_RANGE_250_DEG:
+    Serial.println("+- 250 deg/s");
+    break;
+  case MPU6050_RANGE_500_DEG:
+    Serial.println("+- 500 deg/s");
+    break;
+  case MPU6050_RANGE_1000_DEG:
+    Serial.println("+- 1000 deg/s");
+    break;
+  case MPU6050_RANGE_2000_DEG:
+    Serial.println("+- 2000 deg/s");
+    break;
+  }
+
+  mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+  Serial.print("Filter bandwidth set to: ");
+  switch (mpu.getFilterBandwidth()) {
+  case MPU6050_BAND_260_HZ:
+    Serial.println("260 Hz");
+    break;
+  case MPU6050_BAND_184_HZ:
+    Serial.println("184 Hz");
+    break;
+  case MPU6050_BAND_94_HZ:
+    Serial.println("94 Hz");
+    break;
+  case MPU6050_BAND_44_HZ:
+    Serial.println("44 Hz");
+    break;
+  case MPU6050_BAND_21_HZ:
+    Serial.println("21 Hz");
+    break;
+  case MPU6050_BAND_10_HZ:
+    Serial.println("10 Hz");
+    break;
+  case MPU6050_BAND_5_HZ:
+    Serial.println("5 Hz");
+    break;
+  }
+
+  Serial.println("");
+  delay(100);
+}
+
+// ======================= Initialization (Setup Function) ========================
 void setup() {
-  // -------------------- Initialization ---------------------
   // Setup motor pins
   pinMode(left_motor_pwm_pin, OUTPUT);
   pinMode(left_motor_dir_pin_1, OUTPUT);
@@ -280,29 +458,18 @@ void setup() {
   // Start RPi Serial
   Serial2.begin(115200, SERIAL_8N1, RPi_RX, RPi_TX);
   
-  // Start RFID Serial
-  nfc.begin();
+  // IMU Initialize
+  imuInitialize();
+  Serial.println("IMU Initialized!");
 
-  delay(2000);
-
-  uint32_t versiondata = nfc.getFirmwareVersion();
-  if (! versiondata) {
-    Serial.print("Didn't find PN53x board");
-    while (1); // halt
-  }
-
-  // Got ok data, print it out!
-  Serial.print("Found chip PN5"); Serial.println((versiondata>>24) & 0xFF, HEX); 
-  Serial.print("Firmware ver. "); Serial.print((versiondata>>16) & 0xFF, DEC); 
-  Serial.print('.'); Serial.println((versiondata>>8) & 0xFF, DEC);
-  
-  // configure board to read RFID tags
-  nfc.SAMConfig();
-  // RFID Will now be ready to read at anytime
-  Serial.println("RFID is now initialized, configured, and ready to read!");
+  // RFID Initalize
+  // rfidInitalize();
+  // Serial.println("RFID Initialized!");
 
   // Set micro-ROS transport (UART via Serial2)
   set_microros_serial_transports(Serial2);
+
+  Serial.println("micro-ros transport");
 
   allocator = rcl_get_default_allocator();
 
@@ -311,10 +478,14 @@ void setup() {
     error_loop();
   }
 
+  Serial.println("initialize micro-ros support");
+
   // Create node
   if (rclc_node_init_default(&node, "esp32_node", "", &support) != RCL_RET_OK) {
     error_loop();
   }
+
+  Serial.println("create micro-ros node");
 
   // Create subscriber to /cmd_vel
   if (rclc_subscription_init_default(
@@ -325,38 +496,98 @@ void setup() {
     error_loop();
   }
 
-  // create publisher 
+  // create odom publisher 
   RCCHECK(rclc_publisher_init_default(
-    &publisher,
+    &publisher_odom,
     &node,
     ROSIDL_GET_MSG_TYPE_SUPPORT(nav_msgs, msg, Odometry),
     "micro_ros_odom_publisher"));
 
+    // create imu publisher 
+  RCCHECK(rclc_publisher_init_default(
+    &publisher_imu,
+    &node,
+    ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Imu),
+    "micro_ros_imu_publisher"));
+
   // create timer,
-  const unsigned int timer_timeout = 1000;
+  const unsigned int timer_timeout_odom = 1000;
   RCCHECK(rclc_timer_init_default(
-    &timer,
+    &odom_timer,
     &support,
-    RCL_MS_TO_NS(timer_timeout),
-    timer_callback));
+    RCL_MS_TO_NS(timer_timeout_odom),
+    odom_timer_callback));
+
+  const unsigned int timer_timeout_imu = 1000;
+  RCCHECK(rclc_timer_init_default(
+    &imu_timer,
+    &support,
+    RCL_MS_TO_NS(timer_timeout_imu),
+    imu_timer_callback));
 
   // Create subscriber executor and add subscriber
   executor_sub = rclc_executor_get_zero_initialized_executor();
   RCCHECK(rclc_executor_init(&executor_sub, &support.context, 1, &allocator));
   RCCHECK(rclc_executor_add_subscription(&executor_sub, &subscriber, &cmd_vel_msg, &cmd_vel_callback, ON_NEW_DATA));
 
-  // create publisher executor and add timer
-  RCCHECK(rclc_executor_init(&executor_pub, &support.context, 1, &allocator));
-  RCCHECK(rclc_executor_add_timer(&executor_pub, &timer));
+  // create odom publisher executor and add timer
+  RCCHECK(rclc_executor_init(&executor_pub_odom, &support.context, 1, &allocator));
+  RCCHECK(rclc_executor_add_timer(&executor_pub_odom, &odom_timer));
+
+  RCCHECK(rclc_executor_init(&executor_pub_imu, &support.context, 1, &allocator));
+  RCCHECK(rclc_executor_add_timer(&executor_pub_imu, &imu_timer));
 
   msg.data = 0;
   Serial.println("Micro-ROS Connection Complete!");
   delay(10);
+  Serial.println("System Finished Initialized.");
 }
 
+// Define state machine
+enum class SystemState {
+        idle,
+        rfid,
+        normalMove,
+        obstacle,
+        rerouting,
+        removePayload
+    };
+
+SystemState currentState = SystemState::idle;
+
+// ======================= State Machine (loop Function) ========================
 void loop() {
   delay(100);
   // Run executor periodically
   RCCHECK(rclc_executor_spin_some(&executor_sub, RCL_MS_TO_NS(100)));
-  RCCHECK(rclc_executor_spin_some(&executor_pub, RCL_MS_TO_NS(100)));
+  RCCHECK(rclc_executor_spin_some(&executor_pub_odom, RCL_MS_TO_NS(100)));
+  RCCHECK(rclc_executor_spin_some(&executor_pub_imu, RCL_MS_TO_NS(100)));
+
+  imuStats();
+
+  /* State Machine
+
+  switch(state) {
+    case idle: 
+      break;
+
+    case rfid:
+
+      break;
+
+    case normalMove: 
+      break;
+
+    case obstacle: 
+      break;
+
+    case rerouting: 
+      break;
+
+    case removePayload: 
+      break;
+  }
+  
+
+  */
 }
