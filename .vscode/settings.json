@@ -1,0 +1,8 @@
+{
+    "files.associations": {
+        "fstream": "cpp",
+        "istream": "cpp",
+        "regex": "cpp",
+        "twist__struct.h": "c"
+    }
+}

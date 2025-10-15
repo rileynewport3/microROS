@@ -11,6 +11,7 @@
 #include <geometry_msgs/msg/twist.h> // subscriber
 #include <nav_msgs/msg/odometry.h> // publisher for wheel encoders
 #include <sensor_msgs/msg/imu.h> // publisher for imu
+#include <sensor_msgs/msg/joint_state.h> // publisher for joint states
 #include <std_msgs/msg/int32.h>
 
 #include <rosidl_runtime_c/string_functions.h>
@@ -36,14 +37,14 @@
 
 // Motor pins (adjust to your wiring)
 #define left_motor_pwm_pin 13
-#define left_motor_dir_pin_1 25
-#define left_motor_dir_pin_2 26
+#define left_motor_dir_pin_1 26
+#define left_motor_dir_pin_2 25
 #define left_motor_encA 35
 #define left_motor_encB 34
 
 #define right_motor_pwm_pin 15
-#define right_motor_dir_pin_1 12
-#define right_motor_dir_pin_2 14
+#define right_motor_dir_pin_1 14
+#define right_motor_dir_pin_2 12
 #define right_motor_encA 32 // main board 39
 #define right_motor_encB 33 // main board 26
 
@@ -69,22 +70,31 @@ rcl_allocator_t allocator;
 // publisher
 rcl_publisher_t publisher_odom;
 rcl_publisher_t publisher_imu;
+rcl_publisher_t publisher_joint_state;
 nav_msgs__msg__Odometry odom_msg;
 sensor_msgs__msg__Imu imu_msg;
+sensor_msgs__msg__JointState joint_state_msg;
 std_msgs__msg__Int32 msg;
 rclc_executor_t executor_pub_odom;
 rclc_executor_t executor_pub_imu;
+rclc_executor_t executor_pub_joint_state;
 rcl_timer_t odom_timer;
 rcl_timer_t imu_timer;
+rcl_timer_t joint_state_timer;
 
 // subscriber
 rcl_subscription_t subscriber;
 geometry_msgs__msg__Twist cmd_vel_msg;
 rclc_executor_t executor_sub;
 
+// publisher joint state globals
+rosidl_runtime_c__String name_data[2];
+double position_data[2];
+double velocity_data[2];
+
 // odometry and ecoder global variables
-volatile long left_ticks = 0;
-volatile long right_ticks = 0;
+// volatile long left_ticks = 0;
+// volatile long right_ticks = 0;
 
 float x = 0.0, y = 0.0, theta = 0.0;
 float linear = 0.0, angular = 0.0;
@@ -92,8 +102,8 @@ long last_left_ticks = 0, last_right_ticks = 0;
 unsigned long last_time = 0;
 
 // encoder ISRS
-//void IRAM_ATTR leftEncoderISR() { left_ticks++; }
-//void IRAM_ATTR rightEncoderISR() { right_ticks++; }
+// void IRAM_ATTR leftEncoderISR() { left_ticks++; }
+// void IRAM_ATTR rightEncoderISR() { right_ticks++; }
 
 // encoder pcnt (pulse counters)
 pcnt_unit_t pcnt_unit_left = PCNT_UNIT_0;  // Left motor
@@ -128,8 +138,10 @@ void computeOdometry() {
   float dt = (current_time - last_time) / 1000.0;
   last_time = current_time;
 
-  left_ticks = getEncoderCount(pcnt_unit_left);
-  right_ticks = getEncoderCount(pcnt_unit_right);
+  double left_ticks = getEncoderCount(pcnt_unit_left);
+  double right_ticks = getEncoderCount(pcnt_unit_right);
+  Serial.print("odom left ticks: ");   Serial.println(left_ticks);
+  Serial.print("odom right ticks: ");   Serial.println(right_ticks);
 
   long delta_left = left_ticks - last_left_ticks;
   long delta_right = right_ticks - last_right_ticks;
@@ -265,6 +277,48 @@ void set_motor_pwm(int left_pwm, int right_pwm, int left_dir, int right_dir) {
 
   analogWrite(left_motor_pwm_pin, left_pwm);
   analogWrite(right_motor_pwm_pin, right_pwm);
+}
+
+// ================= Joint State Publisher Callback =================
+void joint_state_timer_callback(rcl_timer_t * timer, int64_t last_call_time)
+{  
+  RCLC_UNUSED(last_call_time);
+
+  uint64_t now_ms = rmw_uros_epoch_millis();
+  joint_state_msg.header.stamp.sec = (int32_t) (now_ms / 1000);
+  joint_state_msg.header.stamp.nanosec = (uint32_t) (now_ms % 1000) * 1000000;
+
+  rosidl_runtime_c__String__assign(&joint_state_msg.header.frame_id, "joint state");
+
+  joint_state_msg.name.capacity = 2;
+  joint_state_msg.name.size = 2;
+  joint_state_msg.name.data = name_data;
+  rosidl_runtime_c__String__assign(&joint_state_msg.name.data[0], "left_wheel_joint");
+  rosidl_runtime_c__String__assign(&joint_state_msg.name.data[1], "right_wheel_joint");
+
+  joint_state_msg.velocity.capacity = 2;
+  joint_state_msg.velocity.size = 2;
+  joint_state_msg.velocity.data = velocity_data;
+
+  double left_ticks = getEncoderCount(pcnt_unit_left);
+  double right_ticks = getEncoderCount(pcnt_unit_right);
+  Serial.print("left ticks: ");   Serial.println(left_ticks);
+  Serial.print("right ticks: ");   Serial.println(right_ticks);
+
+  double left_angle = (left_ticks / TICKS_PER_REV) * 2.0 * M_PI;
+  double right_angle = (right_ticks / TICKS_PER_REV) * 2.0 * M_PI;
+  Serial.print("left angle: ");   Serial.println(left_angle);
+
+  // Update wheel joint positions
+  position_data[0] = left_angle;
+  position_data[1] = right_angle;
+
+  joint_state_msg.position.capacity = 2;
+  joint_state_msg.position.size = 2;
+  joint_state_msg.position.data = position_data;
+
+  // --- Publish ---
+  RCCHECK(rcl_publish(&publisher_joint_state, &joint_state_msg, NULL));
 }
 
 // ================= Subscriber Callback =================
@@ -503,14 +557,21 @@ void setup() {
     ROSIDL_GET_MSG_TYPE_SUPPORT(nav_msgs, msg, Odometry),
     "micro_ros_odom_publisher"));
 
-    // create imu publisher 
+  // create imu publisher 
   RCCHECK(rclc_publisher_init_default(
     &publisher_imu,
     &node,
     ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Imu),
     "micro_ros_imu_publisher"));
 
-  // create timer,
+  // create joint state publisher 
+  RCCHECK(rclc_publisher_init_default(
+    &publisher_joint_state,
+    &node,
+    ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, JointState),
+    "micro_ros_joint_state_publisher"));
+
+  // create odom timer,
   const unsigned int timer_timeout_odom = 1000;
   RCCHECK(rclc_timer_init_default(
     &odom_timer,
@@ -518,6 +579,7 @@ void setup() {
     RCL_MS_TO_NS(timer_timeout_odom),
     odom_timer_callback));
 
+  // create imu timer
   const unsigned int timer_timeout_imu = 1000;
   RCCHECK(rclc_timer_init_default(
     &imu_timer,
@@ -525,8 +587,15 @@ void setup() {
     RCL_MS_TO_NS(timer_timeout_imu),
     imu_timer_callback));
 
+  // create joint state timer
+  const unsigned int timer_timeout_joint_state = 1000;
+  RCCHECK(rclc_timer_init_default(
+    &joint_state_timer,
+    &support,
+    RCL_MS_TO_NS(timer_timeout_joint_state),
+    joint_state_timer_callback));
+
   // Create subscriber executor and add subscriber
-  executor_sub = rclc_executor_get_zero_initialized_executor();
   RCCHECK(rclc_executor_init(&executor_sub, &support.context, 1, &allocator));
   RCCHECK(rclc_executor_add_subscription(&executor_sub, &subscriber, &cmd_vel_msg, &cmd_vel_callback, ON_NEW_DATA));
 
@@ -534,8 +603,14 @@ void setup() {
   RCCHECK(rclc_executor_init(&executor_pub_odom, &support.context, 1, &allocator));
   RCCHECK(rclc_executor_add_timer(&executor_pub_odom, &odom_timer));
 
+  // create imu publisher executor and add timer
   RCCHECK(rclc_executor_init(&executor_pub_imu, &support.context, 1, &allocator));
   RCCHECK(rclc_executor_add_timer(&executor_pub_imu, &imu_timer));
+
+  // create joint state publisher executor and add timer
+  RCCHECK(rclc_executor_init(&executor_pub_joint_state, &support.context, 1, &allocator));
+  RCCHECK(rclc_executor_add_timer(&executor_pub_joint_state, &joint_state_timer));
+
 
   msg.data = 0;
   Serial.println("Micro-ROS Connection Complete!");
@@ -562,6 +637,7 @@ void loop() {
   RCCHECK(rclc_executor_spin_some(&executor_sub, RCL_MS_TO_NS(100)));
   RCCHECK(rclc_executor_spin_some(&executor_pub_odom, RCL_MS_TO_NS(100)));
   RCCHECK(rclc_executor_spin_some(&executor_pub_imu, RCL_MS_TO_NS(100)));
+  RCCHECK(rclc_executor_spin_some(&executor_pub_joint_state, RCL_MS_TO_NS(100)));
 
   imuStats();
 
