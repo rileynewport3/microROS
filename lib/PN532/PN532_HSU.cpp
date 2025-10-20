@@ -2,8 +2,8 @@
 #include "PN532_HSU.h"
 #include "PN532_debug.h"
 
-#define RFID_RX 16
-#define RFID_TX 17
+#define RFID_RX 4
+#define RFID_TX 27
 
 
 PN532_HSU::PN532_HSU(HardwareSerial &serial)
