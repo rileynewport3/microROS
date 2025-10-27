@@ -7,6 +7,7 @@
 #include <rcl/error_handling.h>
 #include <rclc/rclc.h>
 #include <rclc/executor.h>
+#include <mutex>
 
 #include <geometry_msgs/msg/twist.h> // subscriber
 #include <nav_msgs/msg/odometry.h> // publisher for wheel encoders
@@ -33,15 +34,15 @@
 
 
 // ================= Robot Parameters and Pins =================
-#define WHEEL_RADIUS 0.09   // meters
-#define TRACK_WIDTH  0.45   // meters
-#define MAX_PWM      255
+#define WHEEL_RADIUS 0.045   // meters
+#define TRACK_WIDTH 0.45   // meters
+#define MAX_PWM 255
+#define MIN_PWM 45 // could be as low as 40 tbh
 #define MAX_WHEEL_ANGULAR_SPEED 15.71  // rad/s (2 * pi * 150RPM) / 60s
 #define DRIVE_GEAR_REDUCTION 1.0 // no external gears
 #define TICKS_PER_REV 64 // from motor spec sheet
 #define ENCODER_COUNTS_PER_REV 4480 // 64 ticks per rev on motor * 70 gear ratio
 #define DISTANCE_PER_COUNT (PI * 2 * WHEEL_RADIUS) / (ENCODER_COUNTS_PER_REV) // in meters
-
 
 // Motor pins (adjust to your wiring)
 #define left_motor_pwm_pin 13
@@ -104,6 +105,9 @@ rcl_timer_t joint_state_timer;
 rcl_subscription_t subscriber;
 geometry_msgs__msg__Twist cmd_vel_msg;
 rclc_executor_t executor_sub;
+geometry_msgs__msg__Twist last_cmd_vel_msg;
+std::mutex cmd_vel_mutex;
+unsigned long last_cmd_time = 0;
 
 // publisher joint state globals
 rosidl_runtime_c__String name_data[2];
@@ -123,16 +127,16 @@ unsigned long last_time = 0;
 double x;
 double y;
 double th;
-double v_left;//left motor speed
-double v_right;//right motor speed
-double vth;//angular velocity of robot
-double deltaLeft;//no of ticks in left encoder since last update
-double deltaRight;//no of ticks in right encoder since last update
+double v_left; // measured left motor speed
+double v_right; // measured right motor speed
+double vth; // angular velocity of robot
+double deltaLeft; // no of ticks in left encoder since last update
+double deltaRight; // no of ticks in right encoder since last update
 double dt;
-double delta_distance;//distance moved by robot since last update
-double delta_th;//corresponging change in heading
-double delta_x ;//corresponding change in x direction
-double delta_y;//corresponding change in y direction
+double delta_distance; // distance moved by robot since last update
+double delta_th; // corresponging change in heading
+double delta_x ; // corresponding change in x direction
+double delta_y; // corresponding change in y direction
 
 // encoder ISRS
 // void IRAM_ATTR leftEncoderISR() { left_ticks++; }
@@ -183,8 +187,10 @@ void computeOdometry() {
   Serial.print("odom deltaLeft: ");   Serial.println(deltaLeft);
   Serial.print("odom deltaRight: ");  Serial.println(deltaRight);
 
-  v_left = deltaLeft * DISTANCE_PER_COUNT/dt;    //speed = m/s
-  v_right = deltaRight * DISTANCE_PER_COUNT/dt;  //speed = m/s
+  v_left = deltaLeft * DISTANCE_PER_COUNT/dt;    // measured speed = m/s 
+  v_right = deltaRight * DISTANCE_PER_COUNT/dt;  // measured speed = m/s
+
+  Serial.printf("v_left: %f, v_right: %f\n", v_left, v_right);
 
   delta_distance = 0.5f * (double)(deltaLeft + deltaRight) * DISTANCE_PER_COUNT;
   Serial.print("odom delta_distance: ");  Serial.println(delta_distance);
@@ -318,7 +324,7 @@ void setupEncoder(pcnt_unit_t unit, int pinA, int pinB) {
   pcnt_counter_resume(unit);                // Start counting
 }
 
-// Map wheel angular speed (rad/s) to PWM
+// Map wheel angular speed (rad/s) to PWM - returns PWM
 int wheel_speed_to_pwm(float omega) {
   if (omega > MAX_WHEEL_ANGULAR_SPEED) omega = MAX_WHEEL_ANGULAR_SPEED;
   if (omega < -MAX_WHEEL_ANGULAR_SPEED) omega = -MAX_WHEEL_ANGULAR_SPEED;
@@ -388,29 +394,55 @@ void cmd_vel_callback(const void * msgin)
   float linear_x  = msg->linear.x;   // m/s
   float angular_z = msg->angular.z;  // rad/s
 
-  Serial.printf("Received cmd_vel -> linear.x: %.2f, angular.z: %.2f\n", linear_x, angular_z);
+  // Serial.printf("Received cmd_vel -> linear.x: %.2f, angular.z: %.2f\n", linear_x, angular_z);
 
-  // Differential drive formulas
-  float v_left  = linear_x - (TRACK_WIDTH / 2.0) * angular_z;
-  float v_right = linear_x + (TRACK_WIDTH / 2.0) * angular_z;
+  // Differential drive formulas - calculate the requested v_left and v_right
+  float req_v_left  = linear_x - (TRACK_WIDTH / 2.0) * angular_z;
+  float req_v_right = linear_x + (TRACK_WIDTH / 2.0) * angular_z;
+
+  Serial.printf("angular z: %f\n", angular_z);
+  Serial.printf("linear x: %f\n", linear_x);
 
   // Convert to angular velocity
-  float omega_left  = v_left / WHEEL_RADIUS;
-  float omega_right = v_right / WHEEL_RADIUS;
+  float omega_left  = req_v_left / WHEEL_RADIUS;
+  float omega_right = req_v_right / WHEEL_RADIUS;
 
-  // Map to PWM
+  // Map to PWM - simple diff - original left and right pwm requests
   int left_pwm  = wheel_speed_to_pwm(omega_left);
   int right_pwm = wheel_speed_to_pwm(omega_right);
 
-  // Determine motor direction
+  Serial.printf("pwm req: left %lf, right %f\n", left_pwm, right_pwm);
+
+  // Determine motor direction - simple diff
   int left_dir  = (omega_left >= 0) ? HIGH : LOW;
   int right_dir = (omega_right >= 0) ? HIGH : LOW;
+
+ if (fabs(angular_z) < 0.1 && fabs(linear_x) > 0.05) {
+    Serial.println("inside straight correction");
+    // average different in actual wheel speeds for 3 cycles
+    double angular_vel_diff = v_left - v_right;
+    Serial.printf("angular_vel_diff: %lf\n", angular_vel_diff);
+    static double prev_diff = 0;
+    static double prev_diff2 = 0;
+    Serial.printf("prev_diff: %lf, prev_diff2: %lf\n", prev_diff, prev_diff2);
+    double avg_angular_diff = (prev_diff + prev_diff2 + angular_vel_diff) / 3;
+    Serial.printf("avg_angular_diff: %lf\n", avg_angular_diff);
+    prev_diff2 = prev_diff;
+    prev_diff = angular_vel_diff;
+
+    // apply correction to each wheel to try and go straight
+    left_pwm -= (int) (avg_angular_diff * 125); // 125 rad --> 12.5 pwm
+    right_pwm += (int) (avg_angular_diff * 125); 
+  }
+
+  if (abs(left_pwm) <= MIN_PWM) left_pwm = 0;
+  if (abs(right_pwm) <= MIN_PWM) right_pwm = 0;
 
   // Send to motors
   set_motor_pwm(left_pwm, right_pwm, left_dir, right_dir);
 
-  Serial.printf("Wheel omega -> left: %.2f, right: %.2f rad/s\n", omega_left, omega_right);
-  Serial.printf("PWM -> left: %d, right: %d\n", left_pwm, right_pwm);
+  // Serial.printf("Wheel omega -> left: %.2f, right: %.2f rad/s\n", omega_left, omega_right);
+  Serial.printf("Final PWM -- left: %d, right: %d\n", left_pwm, right_pwm);
 }
 
 void rfidInitalize()
