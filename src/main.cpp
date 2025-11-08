@@ -12,9 +12,11 @@
 #include <geometry_msgs/msg/twist.h> // subscriber
 #include <nav_msgs/msg/odometry.h> // publisher for wheel encoders
 #include <sensor_msgs/msg/imu.h> // publisher for imu
-#include <sensor_msgs/msg/joint_state.h> // publisher for joint states
-//#include <geometry_msgs/msg/transform_stamped.h> // publisher for tf
+// #include <sensor_msgs/msg/joint_state.h> // publisher for joint states
 #include <std_msgs/msg/int32.h>
+#include <std_msgs/msg/string.h>
+// #include <geometry_msgs/msg/transform_stamped.h>
+#include <tf2_msgs/msg/tf_message.h>
 
 #include <rosidl_runtime_c/string_functions.h>
 
@@ -29,9 +31,17 @@
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
 #include <Wire.h>
+#include "I2Cdev.h"
+#include "MPU6050.h"
 
-// ultrasonic sensors
+// wi-fi 
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include <certs.h>
+#include <WiFiClientSecure.h>
 
+// IO Expander
+#include "TCA9554.h"
 
 // ================= Robot Parameters and Pins =================
 #define WHEEL_RADIUS 0.045   // meters
@@ -41,21 +51,21 @@
 #define MAX_WHEEL_ANGULAR_SPEED 15.71  // rad/s (2 * pi * 150RPM) / 60s
 #define DRIVE_GEAR_REDUCTION 1.0 // no external gears
 #define TICKS_PER_REV 64 // from motor spec sheet
-#define ENCODER_COUNTS_PER_REV 4480 // 64 ticks per rev on motor * 70 gear ratio
+#define ENCODER_COUNTS_PER_REV 2240 // 64 ticks per rev on motor * 70 gear ratio
 #define DISTANCE_PER_COUNT (PI * 2 * WHEEL_RADIUS) / (ENCODER_COUNTS_PER_REV) // in meters
 
-// Motor pins (adjust to your wiring)
+// Motor pins
 #define left_motor_pwm_pin 13
-#define left_motor_dir_pin_1 25
-#define left_motor_dir_pin_2 26
-#define left_motor_encA 33
-#define left_motor_encB 32
+#define left_motor_dir_pin_1 26
+#define left_motor_dir_pin_2 25
+#define left_motor_encA 34
+#define left_motor_encB 35
 
 #define right_motor_pwm_pin 15
 #define right_motor_dir_pin_1 12
 #define right_motor_dir_pin_2 14
-#define right_motor_encA 35 // main board 39 // swapping these pins to see if it fixes odometry
-#define right_motor_encB 34 // main board 26
+#define right_motor_encA 39
+#define right_motor_encB 36 
 
 // ======================== UART Pins ============================
 #define RPi_RX 16
@@ -68,6 +78,8 @@
 // SCL 22
 // SDA 21
 
+// IO Expander
+TCA9554 TCA(0x20);
 
 // ====== Globals ======
 volatile bool obstacleDetected = false;
@@ -85,21 +97,22 @@ rcl_allocator_t allocator;
 // publisher
 rcl_publisher_t publisher_odom;
 rcl_publisher_t publisher_imu;
-rcl_publisher_t publisher_joint_state;
-rcl_publisher_t publisher_odom_tf;
+rcl_publisher_t publisher_tf;
 nav_msgs__msg__Odometry odom_msg;
 sensor_msgs__msg__Imu imu_msg;
-sensor_msgs__msg__JointState joint_state_msg;
-// geometry_msgs__msg__TransformStamped tf_msg;
+tf2_msgs__msg__TFMessage tf_msg;
+geometry_msgs__msg__TransformStamped odom_tf;
 
 std_msgs__msg__Int32 msg;
+std_msgs__msg__String rfid_location_msg;
 rclc_executor_t executor_pub_odom;
 rclc_executor_t executor_pub_imu;
-rclc_executor_t executor_pub_joint_state;
-rclc_executor_t executor_odom_tf;
+// rclc_executor_t executor_odom_tf;
+rclc_executor_t executor_cmd_vel;
+rcl_timer_t control_timer;
 rcl_timer_t odom_timer;
 rcl_timer_t imu_timer;
-rcl_timer_t joint_state_timer;
+rcl_timer_t tf_timer;
 
 // subscriber
 rcl_subscription_t subscriber;
@@ -109,17 +122,17 @@ geometry_msgs__msg__Twist last_cmd_vel_msg;
 std::mutex cmd_vel_mutex;
 unsigned long last_cmd_time = 0;
 
-// publisher joint state globals
-rosidl_runtime_c__String name_data[2];
-double position_data[2];
-double velocity_data[2];
+// // publisher joint state globals
+// rosidl_runtime_c__String name_data[2];
+// double position_data[2];
+// double velocity_data[2];
 
-// odometry and ecoder global variables
-// volatile long left_ticks = 0;
-// volatile long right_ticks = 0;
+// imu stats
+int16_t ax, ay, az;
+int16_t gx, gy, gz;
+volatile int16_t si_ax, si_ay, si_az;
+volatile int16_t si_gx, si_gy, si_gz;
 
-// float x = 0.0, y = 0.0, theta = 0.0;
-// float linear = 0.0, angular = 0.0;
 long last_left_ticks = 0, last_right_ticks = 0;
 unsigned long last_time = 0;
 
@@ -138,10 +151,6 @@ double delta_th; // corresponging change in heading
 double delta_x ; // corresponding change in x direction
 double delta_y; // corresponding change in y direction
 
-// encoder ISRS
-// void IRAM_ATTR leftEncoderISR() { left_ticks++; }
-// void IRAM_ATTR rightEncoderISR() { right_ticks++; }
-
 // encoder pcnt (pulse counters)
 pcnt_unit_t pcnt_unit_left = PCNT_UNIT_0;  // Left motor
 pcnt_unit_t pcnt_unit_right = PCNT_UNIT_1; // Right motor
@@ -152,9 +161,18 @@ PN532 nfc(pn532hsu);
 
 // IMU
 Adafruit_MPU6050 mpu;
+MPU6050 accelgyro; // second imu library
+
+// Wi-Fi
+static const char * brokerHost = "r38d6e25.ala.us-east-1.emqxsl.com";
+static const uint16_t brokerPort = 8883; // TLS
+static const String brokerUser = "parcel";
+static const String brokerPass = "password";
+
+WiFiClientSecure secureClient;
+PubSubClient mqttClient(secureClient);
 
 // ================= Utility Functions for Micro-ROS =================
-
 // Error loop if init fails
 void error_loop() {
   while (1) {
@@ -208,29 +226,6 @@ void computeOdometry() {
   x += delta_x;
   y += delta_y;
   th += delta_th;
-
-  //float dist_left = (2 * PI * WHEEL_RADIUS * deltaLeft) / TICKS_PER_REV;
-  // float dist_right = (2 * PI * WHEEL_RADIUS * deltaRight) / TICKS_PER_REV;
-  
-  // Velocities of each wheel
-  //float v_left = dist_left / dt;
-  //float v_right = dist_right / dt;
-  
-  // Robot linear & angular velocities
-  // linear = (v_right + v_left) / 2.0;
-  // angular = (v_right - v_left) / TRACK_WIDTH;
-
-  // // pose update
-  // float dist = (dist_right + dist_left) / 2.0;
-  // float dtheta = (dist_right - dist_left) / TRACK_WIDTH;
-
-  // x += dist * cos(theta + dtheta / 2.0);
-  // y += dist * sin(theta + dtheta / 2.0);
-  // theta += dtheta;
-
-  // // Normalize theta to [-pi, pi]
-  // if (theta > PI) theta -= 2 * PI;
-  // else if (theta < -PI) theta += 2 * PI;
 }
 
 // ================= ODOM Publisher Callback =================
@@ -260,7 +255,24 @@ void odom_timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
   odom_msg.pose.pose.orientation.z = qz;
   odom_msg.pose.pose.orientation.w = qw;
 
+  double odom_covariances[36] = {0.1, 0, 0, 0, 0, 0, 
+                                  0, 0.1, 0, 0, 0, 0,
+                                  0, 0, 0.1, 0, 0, 0, 
+                                  0, 0, 0, 0.1, 0, 0, 
+                                  0, 0, 0, 0, 0.1, 0, 
+                                  0, 0, 0, 0, 0, 0.1};
+
+  // copy odom covariance matrix into odom_msg cavariance matrix for pose and twist
+  std::copy(std::begin(odom_covariances),
+  std::end(odom_covariances),
+  std::begin(odom_msg.pose.covariance));
+
+  std::copy(std::begin(odom_covariances),
+  std::end(odom_covariances),
+  std::begin(odom_msg.twist.covariance));
+
   odom_msg.twist.twist.linear.x = delta_x/dt;
+  odom_msg.twist.twist.linear.y = delta_y/dt; // added
   odom_msg.twist.twist.angular.z = delta_th/dt;
 
   // Publish
@@ -270,6 +282,30 @@ void odom_timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
   //   RCSOFTCHECK(rcl_publish(&publisher, &msg, NULL));
   //   msg.data++;
   // }
+
+  // ---------------------------------------------------------
+  // Create odom -> base_link transform for TF
+  // ---------------------------------------------------------
+
+  // odom_tf.header.stamp = odom_msg.header.stamp;  // same time as odom
+  // odom_tf.header.frame_id.data = "odom";
+  // odom_tf.child_frame_id.data = "base_link";
+
+  // // Position
+  // odom_tf.transform.translation.x = odom_msg.pose.pose.position.x;
+  // odom_tf.transform.translation.y = odom_msg.pose.pose.position.y;
+  // odom_tf.transform.translation.z = 0.0;
+
+  // // Orientation (same quaternion as odom)
+  // odom_tf.transform.rotation = odom_msg.pose.pose.orientation;
+
+  // // Wrap into TFMessage
+  // tf_msg.transforms.size = 1;
+  // tf_msg.transforms.data = &odom_tf;
+
+  // Publish TF
+  // RCCHECK(rcl_publish(&publisher_tf, &tf_msg, NULL));
+
 }
 
 // ================= IMU Publisher Callback =================
@@ -284,18 +320,52 @@ void imu_timer_callback(rcl_timer_t * timer, int64_t last_call_time)
   rosidl_runtime_c__String__assign(&imu_msg.header.frame_id, "imu");
 
   // --- Get new sensor events with the readings ---
-  sensors_event_t a, g, temp;
-  mpu.getEvent(&a, &g, &temp);
+  accelgyro.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+  
+  double si_ax = ((double) ax / 16384) * 9.80665;
+  double si_ay = ((double) ay / 16384) * 9.80665;
+  double si_az = ((double) az / 16384) * 9.80665;
+
+  double si_gx = ((double) gx / 131);
+  double si_gy = ((double) gy / 131);
+  double si_gz = ((double) gz / 131);
+
+  Serial.print("si acc: ");
+  Serial.print(si_ax); Serial.print("\t"); 
+  Serial.print(si_ay); Serial.print("\t");
+  Serial.println(si_az);
+
+  Serial.print("si gyro: ");
+  Serial.print(si_gx); Serial.print("\t");
+  Serial.print(si_gy); Serial.print("\t");
+  Serial.println(si_gz); Serial.print("\t");
+  Serial.println("");
 
   // --- fill angular velocity ---
-  imu_msg.angular_velocity.x = g.gyro.x;
-  imu_msg.angular_velocity.y = g.gyro.y;
-  imu_msg.angular_velocity.z = g.gyro.z;
+  imu_msg.angular_velocity.x = si_gx;
+  imu_msg.angular_velocity.y = si_gy;
+  imu_msg.angular_velocity.z = si_gz;
 
   // --- fill linear acceleration ---
-  imu_msg.linear_acceleration.x = a.acceleration.x;
-  imu_msg.linear_acceleration.y = a.acceleration.y;
-  imu_msg.linear_acceleration.z = a.acceleration.z;
+  imu_msg.linear_acceleration.x = si_ax;
+  imu_msg.linear_acceleration.y = si_ay;
+  imu_msg.linear_acceleration.z = si_az;
+
+    // --- set covariance matrixes ---
+  double imu_covariances[9] = {0.05, 0, 0,
+                                0, 0.05, 0,
+                                0, 0, 0.05};
+
+  imu_msg.orientation_covariance[0] = -1;
+
+  // copy odom covariance matrix into imu_msg cavariance matrix for linear acc and ang vel
+  std::copy(std::begin(imu_covariances),
+  std::end(imu_covariances),
+  std::begin(imu_msg.linear_acceleration_covariance));
+
+  std::copy(std::begin(imu_covariances),
+  std::end(imu_covariances),
+  std::begin(imu_msg.angular_velocity_covariance));
 
   // --- Publish ---
   RCCHECK(rcl_publish(&publisher_imu, &imu_msg, NULL));
@@ -333,7 +403,7 @@ int wheel_speed_to_pwm(float omega) {
 
 // Send PWM and direction to motors
 void set_motor_pwm(int left_pwm, int right_pwm, int left_dir, int right_dir) {
-  Serial.println("In set_motor_pwm");
+
   digitalWrite(left_motor_dir_pin_1, left_dir);
   digitalWrite(left_motor_dir_pin_2, (!left_dir));
 
@@ -344,55 +414,79 @@ void set_motor_pwm(int left_pwm, int right_pwm, int left_dir, int right_dir) {
   analogWrite(right_motor_pwm_pin, right_pwm);
 }
 
-// ================= Joint State Publisher Callback =================
-void joint_state_timer_callback(rcl_timer_t * timer, int64_t last_call_time)
-{  
-  RCLC_UNUSED(last_call_time);
-
-  uint64_t now_ms = rmw_uros_epoch_millis();
-  joint_state_msg.header.stamp.sec = (int32_t) (now_ms / 1000);
-  joint_state_msg.header.stamp.nanosec = (uint32_t) (now_ms % 1000) * 1000000;
-
-  rosidl_runtime_c__String__assign(&joint_state_msg.header.frame_id, "joint state");
-
-  joint_state_msg.name.capacity = 2;
-  joint_state_msg.name.size = 2;
-  joint_state_msg.name.data = name_data;
-  rosidl_runtime_c__String__assign(&joint_state_msg.name.data[0], "left_wheel_joint");
-  rosidl_runtime_c__String__assign(&joint_state_msg.name.data[1], "right_wheel_joint");
-
-  joint_state_msg.velocity.capacity = 2;
-  joint_state_msg.velocity.size = 2;
-  joint_state_msg.velocity.data = velocity_data;
-
-  double left_ticks = getEncoderCount(pcnt_unit_left);
-  double right_ticks = getEncoderCount(pcnt_unit_right);
-  // Serial.print("left ticks: ");   Serial.println(left_ticks);
-  // Serial.print("right ticks: ");   Serial.println(right_ticks);
-
-  double left_angle = (left_ticks / TICKS_PER_REV) * 2.0 * M_PI;
-  double right_angle = (right_ticks / TICKS_PER_REV) * 2.0 * M_PI;
-  // Serial.print("left angle: ");   Serial.println(left_angle);
-
-  // Update wheel joint positions
-  position_data[0] = left_angle;
-  position_data[1] = right_angle;
-
-  joint_state_msg.position.capacity = 2;
-  joint_state_msg.position.size = 2;
-  joint_state_msg.position.data = position_data;
-
-  // --- Publish ---
-  RCCHECK(rcl_publish(&publisher_joint_state, &joint_state_msg, NULL));
+// Stops both motors by setting pwms to 0
+void stop_motors()
+{
+  set_motor_pwm(0, 0, LOW, LOW);
 }
+
+// // ================= Joint State Publisher Callback =================
+// void joint_state_timer_callback(rcl_timer_t * timer, int64_t last_call_time)
+// {  
+//   RCLC_UNUSED(last_call_time);
+
+//   uint64_t now_ms = rmw_uros_epoch_millis();
+//   joint_state_msg.header.stamp.sec = (int32_t) (now_ms / 1000);
+//   joint_state_msg.header.stamp.nanosec = (uint32_t) (now_ms % 1000) * 1000000;
+
+//   rosidl_runtime_c__String__assign(&joint_state_msg.header.frame_id, "joint state");
+
+//   joint_state_msg.name.capacity = 2;
+//   joint_state_msg.name.size = 2;
+//   joint_state_msg.name.data = name_data;
+//   rosidl_runtime_c__String__assign(&joint_state_msg.name.data[0], "left_wheel_joint");
+//   rosidl_runtime_c__String__assign(&joint_state_msg.name.data[1], "right_wheel_joint");
+
+//   joint_state_msg.velocity.capacity = 2;
+//   joint_state_msg.velocity.size = 2;
+//   joint_state_msg.velocity.data = velocity_data;
+
+//   double left_ticks = getEncoderCount(pcnt_unit_left);
+//   double right_ticks = getEncoderCount(pcnt_unit_right);
+//   // Serial.print("left ticks: ");   Serial.println(left_ticks);
+//   // Serial.print("right ticks: ");   Serial.println(right_ticks);
+
+//   double left_angle = (left_ticks / TICKS_PER_REV) * 2.0 * M_PI;
+//   double right_angle = (right_ticks / TICKS_PER_REV) * 2.0 * M_PI;
+//   // Serial.print("left angle: ");   Serial.println(left_angle);
+
+//   // Update wheel joint positions
+//   position_data[0] = left_angle;
+//   position_data[1] = right_angle;
+
+//   joint_state_msg.position.capacity = 2;
+//   joint_state_msg.position.size = 2;
+//   joint_state_msg.position.data = position_data;
+
+//   // --- Publish ---
+//   RCCHECK(rcl_publish(&publisher_joint_state, &joint_state_msg, NULL));
+// }
 
 // ================= Subscriber Callback =================
 void cmd_vel_callback(const void * msgin)
 {
-  const geometry_msgs__msg__Twist * msg = (const geometry_msgs__msg__Twist *)msgin;
+    const geometry_msgs__msg__Twist * msg = (const geometry_msgs__msg__Twist *)msgin;
+    
+    std::lock_guard<std::mutex> lock(cmd_vel_mutex);
+    last_cmd_vel_msg = *msg;
+    last_cmd_time = millis(); // timestamp for timeout
+}
 
-  float linear_x  = msg->linear.x;   // m/s
-  float angular_z = msg->angular.z;  // rad/s
+void control_timer_callback(rcl_timer_t * timer, int64_t last_call_time)
+{
+  geometry_msgs__msg__Twist cmd_copy;
+  {
+      std::lock_guard<std::mutex> lock(cmd_vel_mutex);
+      cmd_copy = last_cmd_vel_msg;
+  }
+
+  // if (millis() - last_cmd_time > 60000) { // 60 seconds
+      //   stop_motors();
+      // return;
+  // }
+
+  float linear_x  = cmd_copy.linear.x;   // m/s
+  float angular_z = cmd_copy.angular.z;  // rad/s
 
   // Serial.printf("Received cmd_vel -> linear.x: %.2f, angular.z: %.2f\n", linear_x, angular_z);
 
@@ -407,38 +501,71 @@ void cmd_vel_callback(const void * msgin)
   float omega_left  = req_v_left / WHEEL_RADIUS;
   float omega_right = req_v_right / WHEEL_RADIUS;
 
-  // Map to PWM - simple diff - original left and right pwm requests
-  int left_pwm  = wheel_speed_to_pwm(omega_left);
-  int right_pwm = wheel_speed_to_pwm(omega_right);
+  // // Map to PWM - simple diff - original left and right pwm requests
+  double left_pwm  = wheel_speed_to_pwm(omega_left);
+  double right_pwm = wheel_speed_to_pwm(omega_right);
 
-  Serial.printf("pwm req: left %lf, right %f\n", left_pwm, right_pwm);
+  Serial.printf("pwm req: left %lf, right %f\n", req_v_left, req_v_right);
 
   // Determine motor direction - simple diff
   int left_dir  = (omega_left >= 0) ? HIGH : LOW;
   int right_dir = (omega_right >= 0) ? HIGH : LOW;
 
- if (fabs(angular_z) < 0.1 && fabs(linear_x) > 0.05) {
-    Serial.println("inside straight correction");
-    // average different in actual wheel speeds for 3 cycles
-    double angular_vel_diff = v_left - v_right;
-    Serial.printf("angular_vel_diff: %lf\n", angular_vel_diff);
-    static double prev_diff = 0;
-    static double prev_diff2 = 0;
-    Serial.printf("prev_diff: %lf, prev_diff2: %lf\n", prev_diff, prev_diff2);
-    double avg_angular_diff = (prev_diff + prev_diff2 + angular_vel_diff) / 3;
-    Serial.printf("avg_angular_diff: %lf\n", avg_angular_diff);
-    prev_diff2 = prev_diff;
-    prev_diff = angular_vel_diff;
+  // Compute per-wheel error
+  float left_error  = req_v_left - v_left; // move dec over
+  float right_error = req_v_right - v_right; // move dec over
 
-    // apply correction to each wheel to try and go straight
-    left_pwm -= (int) (avg_angular_diff * 125); // 125 rad --> 12.5 pwm
-    right_pwm += (int) (avg_angular_diff * 125); 
+  Serial.printf("left_error: %f right_error: %f\n", left_error, right_error);
+
+  // Convert error to PWM correction
+  // float drift_gain = 120; // tune this, converted v -> PWM
+  // Serial.printf("add adjustment for left error %d\n", (int)(left_error * drift_gain));
+  // Serial.printf("add adjustment for right error %d\n", (int)(right_error * drift_gain));
+  // Serial.printf("left pwm: %d", wheel_speed_to_pwm(req_v_left / WHEEL_RADIUS));
+  // Serial.printf("right pwm: %d", wheel_speed_to_pwm(req_v_right / WHEEL_RADIUS));
+
+  // convert to pwm
+  // Apply correction in PWM units
+  // int left_pwm  = wheel_speed_to_pwm(req_v_left / WHEEL_RADIUS)  + (left_error * drift_gain);
+  // int right_pwm = wheel_speed_to_pwm(req_v_right / WHEEL_RADIUS) + (right_error * drift_gain);
+
+  // deadband if too slow of pwm
+  if (abs(left_pwm) <= MIN_PWM) {
+    left_pwm = 0;
+    left_dir = LOW;
   }
 
-  if (abs(left_pwm) <= MIN_PWM) left_pwm = 0;
-  if (abs(right_pwm) <= MIN_PWM) right_pwm = 0;
+  if (abs(right_pwm) <= MIN_PWM) {
+    right_pwm = 0;
+    right_dir = LOW;
+  }
+
+//  if (fabs(angular_z) < 0.1 && fabs(linear_x) > 0.05) {
+//     Serial.println("inside straight correction");
+//     // average different in actual wheel speeds for 3 cycles
+//     double angular_vel_diff = v_left - v_right;
+//     Serial.printf("angular_vel_diff: %lf\n", angular_vel_diff);
+//     static double prev_diff = 0;
+//     static double prev_diff2 = 0;
+//     Serial.printf("prev_diff: %lf, prev_diff2: %lf\n", prev_diff, prev_diff2);
+//     double avg_angular_diff = (prev_diff + prev_diff2 + angular_vel_diff) / 3;
+//     Serial.printf("avg_angular_diff: %lf\n", avg_angular_diff);
+//     prev_diff2 = prev_diff;
+//     prev_diff = angular_vel_diff;
+
+//     // apply correction to each wheel to try and go straight
+//     left_pwm -= (int) (avg_angular_diff * 125); // 125 rad --> 12.5 pwm
+//     right_pwm += (int) (avg_angular_diff * 125); 
+//   }
+
+//   if (abs(left_pwm) <= MIN_PWM) left_pwm = 0;
+//   if (abs(right_pwm) <= MIN_PWM) right_pwm = 0;
 
   // Send to motors
+  // Serial.printf("left_pwm * 1.1 : %d", (int)(left_pwm*1.1));
+  
+  // left_pwm *= 1.1; // manual bias the left wheel
+  
   set_motor_pwm(left_pwm, right_pwm, left_dir, right_dir);
 
   // Serial.printf("Wheel omega -> left: %.2f, right: %.2f rad/s\n", omega_left, omega_right);
@@ -468,110 +595,21 @@ void rfidInitalize()
   // Serial.println("RFID is now initialized, configured, and ready to read!");
 }
 
-void imuStats() 
-{
-  /* Get new sensor events with the readings */
-  sensors_event_t a, g, temp;
-  mpu.getEvent(&a, &g, &temp);
-
-  /* Print out the values */
-  Serial.print("Acceleration X: ");
-  Serial.print(a.acceleration.x);
-  Serial.print(", Y: ");
-  Serial.print(a.acceleration.y);
-  Serial.print(", Z: ");
-  Serial.print(a.acceleration.z);
-  Serial.println(" m/s^2");
-
-  Serial.print("Rotation X: ");
-  Serial.print(g.gyro.x);
-  Serial.print(", Y: ");
-  Serial.print(g.gyro.y);
-  Serial.print(", Z: ");
-  Serial.print(g.gyro.z);
-  Serial.println(" rad/s");
-
-  Serial.print("Temperature: ");
-  Serial.print(temp.temperature);
-  Serial.println(" degC");
-
-  Serial.println("");
-  delay(500);
-}
-
 void imuInitialize()
 {
-  // Serial.println("Adafruit MPU6050 test!");
+  Wire.begin();
+  accelgyro.initialize();
 
-  // Try to initialize!
-  if (!mpu.begin()) {
-    Serial.println("Failed to find MPU6050 chip");
-    while (1) {
-      delay(10);
-    }
-  }
-  Serial.println("IMU Found!");
+  Serial.println("Testing device connections...");
+  Serial.println(accelgyro.testConnection() ? "MPU6050 connection successful" : "MPU6050 connection failed");
 
-  mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
-  Serial.print("Accelerometer range set to: ");
-  switch (mpu.getAccelerometerRange()) {
-  case MPU6050_RANGE_2_G:
-    Serial.println("+-2G");
-    break;
-  case MPU6050_RANGE_4_G:
-    Serial.println("+-4G");
-    break;
-  case MPU6050_RANGE_8_G:
-    Serial.println("+-8G");
-    break;
-  case MPU6050_RANGE_16_G:
-    Serial.println("+-16G");
-    break;
-  }
-  mpu.setGyroRange(MPU6050_RANGE_500_DEG);
-  Serial.print("Gyro range set to: ");
-  switch (mpu.getGyroRange()) {
-  case MPU6050_RANGE_250_DEG:
-    Serial.println("+- 250 deg/s");
-    break;
-  case MPU6050_RANGE_500_DEG:
-    Serial.println("+- 500 deg/s");
-    break;
-  case MPU6050_RANGE_1000_DEG:
-    Serial.println("+- 1000 deg/s");
-    break;
-  case MPU6050_RANGE_2000_DEG:
-    Serial.println("+- 2000 deg/s");
-    break;
-  }
-
-  mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
-  Serial.print("Filter bandwidth set to: ");
-  switch (mpu.getFilterBandwidth()) {
-  case MPU6050_BAND_260_HZ:
-    Serial.println("260 Hz");
-    break;
-  case MPU6050_BAND_184_HZ:
-    Serial.println("184 Hz");
-    break;
-  case MPU6050_BAND_94_HZ:
-    Serial.println("94 Hz");
-    break;
-  case MPU6050_BAND_44_HZ:
-    Serial.println("44 Hz");
-    break;
-  case MPU6050_BAND_21_HZ:
-    Serial.println("21 Hz");
-    break;
-  case MPU6050_BAND_10_HZ:
-    Serial.println("10 Hz");
-    break;
-  case MPU6050_BAND_5_HZ:
-    Serial.println("5 Hz");
-    break;
-  }
-
-  delay(100);
+  // set offsets for calibration
+  accelgyro.setXAccelOffset(-1414.00000);
+  accelgyro.setYAccelOffset(1138.00000);
+  accelgyro.setZAccelOffset(1859.00000);
+  accelgyro.setXGyroOffset(43.00000);
+  accelgyro.setYGyroOffset(-3.00000);
+  accelgyro.setZGyroOffset(49.00000);
 }
 
 // ======================= Initialization (Setup Function) ========================
@@ -611,6 +649,19 @@ void setup() {
   // rfidInitalize();
   // Serial.println("RFID Initialized!");
 
+  // Serial.println("before wifi");
+  // Wi-Fi
+  // secureClient.setCACert(EMQX_ROOT_CA); // gives certification to connect to online broker
+  
+  // WiFi.begin(brokerUser, brokerPass);
+
+  // while (WiFi.status() != WL_CONNECTED) { delay(250); } // waiting till connected
+
+  // connect MQTT server
+  // mqttClient.setServer(brokerHost, brokerPort);
+
+  // Serial.println("after wifi");
+
   // Set micro-ROS transport (UART via Serial2)
   set_microros_serial_transports(Serial2);
 
@@ -649,19 +700,13 @@ void setup() {
     ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Imu),
     "micro_ros_imu_publisher"));
 
-  // create joint state publisher 
-  RCCHECK(rclc_publisher_init_default(
-    &publisher_joint_state,
-    &node,
-    ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, JointState),
-    "micro_ros_joint_state_publisher"));
-
-  // // create odom tf publisher 
+  // xSerial.println("before tf publisher");
+  // create tf publisher
   // RCCHECK(rclc_publisher_init_default(
-  //   &publisher_odom_tf,
+  //   &publisher_tf,
   //   &node,
-  //   ROSIDL_GET_MSG_TYPE_SUPPORT(tf2_msgs, msg, TFMessage),
-  //   "micro_ros_joint_state_publisher"));
+  //   ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, TFMessage),
+  //   "tf_custom"));
 
   // create odom timer,
   const unsigned int timer_timeout_odom = 1000;
@@ -679,16 +724,17 @@ void setup() {
     RCL_MS_TO_NS(timer_timeout_imu),
     imu_timer_callback));
 
-  // create joint state timer
-  const unsigned int timer_timeout_joint_state = 1000;
+  // cmd_control timer
+  const unsigned int timer_timeout_cmd_control = 1000;
   RCCHECK(rclc_timer_init_default(
-    &joint_state_timer,
-    &support,
-    RCL_MS_TO_NS(timer_timeout_joint_state),
-    joint_state_timer_callback));
+    &control_timer,
+    &support,                                 // your rclc support struct
+    RCL_MS_TO_NS(timer_timeout_cmd_control),  // 100 Hz
+    control_timer_callback));                 // timer callback
 
   // Create subscriber executor and add subscriber
-  RCCHECK(rclc_executor_init(&executor_sub, &support.context, 1, &allocator));
+  RCCHECK(rclc_executor_init(&executor_sub, &support.context, 2, &allocator));
+  RCCHECK(rclc_executor_add_timer(&executor_sub, &control_timer));
   RCCHECK(rclc_executor_add_subscription(&executor_sub, &subscriber, &cmd_vel_msg, &cmd_vel_callback, ON_NEW_DATA));
 
   // create odom publisher executor and add timer
@@ -699,15 +745,19 @@ void setup() {
   RCCHECK(rclc_executor_init(&executor_pub_imu, &support.context, 1, &allocator));
   RCCHECK(rclc_executor_add_timer(&executor_pub_imu, &imu_timer));
 
-  // create joint state publisher executor and add timer
-  RCCHECK(rclc_executor_init(&executor_pub_joint_state, &support.context, 1, &allocator));
-  RCCHECK(rclc_executor_add_timer(&executor_pub_joint_state, &joint_state_timer));
-
   msg.data = 0;
-  Serial.println("Connection to Raspberry Pi Complete!");
-  delay(10);
+  
+  // Turn on LED with IO Expander
+  Wire.begin();
+  TCA.begin();
+
+  Wire.setClock(50000);
+  TCA.pinMode1(0, OUTPUT);
+  TCA.write1(0, HIGH);
+
+  Serial.println("\nConnection to Raspberry Pi Complete!");
   Serial.println("System Finished Initializing.");
-  Serial.println("PARCEL is waiting for a package.");
+  Serial.println("PARCEL is waiting for a package.\n");
 }
 
 // Define state machine
@@ -724,14 +774,11 @@ SystemState currentState = SystemState::idle;
 
 // ======================= State Machine (loop Function) ========================
 void loop() {
-  delay(100);
+  delay(10);
   // Run executor periodically
-  RCCHECK(rclc_executor_spin_some(&executor_sub, RCL_MS_TO_NS(100)));
+  RCCHECK(rclc_executor_spin_some(&executor_sub, RCL_MS_TO_NS(100)));  // (10hz)
   RCCHECK(rclc_executor_spin_some(&executor_pub_odom, RCL_MS_TO_NS(100)));
   RCCHECK(rclc_executor_spin_some(&executor_pub_imu, RCL_MS_TO_NS(100)));
-  RCCHECK(rclc_executor_spin_some(&executor_pub_joint_state, RCL_MS_TO_NS(100)));
-
-  // imuStats();
 
   // Do other stuff here
   // delay(10);
@@ -793,6 +840,12 @@ void loop() {
             
                 // Move to normalMove
                 Serial.println("Making route to location.");
+
+                // publish location to raspberry pi
+
+                // publish to app 
+
+                // update state
                 currentState = SystemState::normalMove;
               }
               else
