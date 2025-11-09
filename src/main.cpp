@@ -45,7 +45,7 @@
 
 // ================= Robot Parameters and Pins =================
 #define WHEEL_RADIUS 0.045   // meters
-#define TRACK_WIDTH 0.45   // meters
+#define TRACK_WIDTH 0.51   // meters
 #define MAX_PWM 255
 #define MIN_PWM 45 // could be as low as 40 tbh
 #define MAX_WHEEL_ANGULAR_SPEED 15.71  // rad/s (2 * pi * 150RPM) / 60s
@@ -317,7 +317,7 @@ void imu_timer_callback(rcl_timer_t * timer, int64_t last_call_time)
   uint64_t now_ms = rmw_uros_epoch_millis();
   imu_msg.header.stamp.sec = now_ms / 1000;
   imu_msg.header.stamp.nanosec = (now_ms % 1000) * 1000000;
-  rosidl_runtime_c__String__assign(&imu_msg.header.frame_id, "imu");
+  rosidl_runtime_c__String__assign(&imu_msg.header.frame_id, "imu_link");
 
   // --- Get new sensor events with the readings ---
   accelgyro.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
@@ -326,9 +326,9 @@ void imu_timer_callback(rcl_timer_t * timer, int64_t last_call_time)
   double si_ay = ((double) ay / 16384) * 9.80665;
   double si_az = ((double) az / 16384) * 9.80665;
 
-  double si_gx = ((double) gx / 131);
-  double si_gy = ((double) gy / 131);
-  double si_gz = ((double) gz / 131);
+  double si_gx = ((double) gx / 131 * M_PI/180);
+  double si_gy = ((double) gy / 131 * M_PI/180);
+  double si_gz = ((double) gz / 131 * M_PI/180);
 
   Serial.print("si acc: ");
   Serial.print(si_ax); Serial.print("\t"); 
@@ -604,12 +604,12 @@ void imuInitialize()
   Serial.println(accelgyro.testConnection() ? "MPU6050 connection successful" : "MPU6050 connection failed");
 
   // set offsets for calibration
-  accelgyro.setXAccelOffset(-1414.00000);
-  accelgyro.setYAccelOffset(1138.00000);
-  accelgyro.setZAccelOffset(1859.00000);
-  accelgyro.setXGyroOffset(43.00000);
-  accelgyro.setYGyroOffset(-3.00000);
-  accelgyro.setZGyroOffset(49.00000);
+  accelgyro.setXAccelOffset(-1405.00000);
+  accelgyro.setYAccelOffset(1115.00000);
+  accelgyro.setZAccelOffset(1843.00000);
+  accelgyro.setXGyroOffset(37.00000);
+  accelgyro.setYGyroOffset(-10.00000);
+  accelgyro.setZGyroOffset(36.00000);
 }
 
 // ======================= Initialization (Setup Function) ========================
@@ -637,9 +637,6 @@ void setup() {
   // Initialize left and right encoders
   setupEncoder(pcnt_unit_left, left_motor_encA, left_motor_encB);
   setupEncoder(pcnt_unit_right, right_motor_encA, right_motor_encB);
-
-  // Start RPi Serial
-  Serial2.begin(115200, SERIAL_8N1, RPi_RX, RPi_TX);
   
   // IMU Initialize
   imuInitialize();
@@ -662,6 +659,14 @@ void setup() {
 
   // Serial.println("after wifi");
 
+  Serial.println("Waiting for Raspberry Pi to Boot up. ");
+  // before connecting delay 20s to wait for RPi Boot up
+  delay(30000); 
+
+  // Start RPi Serial
+  Serial2.begin(115200, SERIAL_8N1, RPi_RX, RPi_TX);
+
+  Serial.println("Establishing MicroRos Transport to Raspberry Pi.");
   // Set micro-ROS transport (UART via Serial2)
   set_microros_serial_transports(Serial2);
 
@@ -698,7 +703,7 @@ void setup() {
     &publisher_imu,
     &node,
     ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Imu),
-    "micro_ros_imu_publisher"));
+    "imu/data_raw"));
 
   // xSerial.println("before tf publisher");
   // create tf publisher
@@ -747,6 +752,8 @@ void setup() {
 
   msg.data = 0;
   
+  Serial.println("Connection to Raspberry Pi Complete!");
+
   // Turn on LED with IO Expander
   Wire.begin();
   TCA.begin();
@@ -755,7 +762,6 @@ void setup() {
   TCA.pinMode1(0, OUTPUT);
   TCA.write1(0, HIGH);
 
-  Serial.println("\nConnection to Raspberry Pi Complete!");
   Serial.println("System Finished Initializing.");
   Serial.println("PARCEL is waiting for a package.\n");
 }
