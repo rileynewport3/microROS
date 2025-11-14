@@ -11,14 +11,12 @@
 #include <mutex>
 
 #include <geometry_msgs/msg/twist.h> // subscriber
-#include <nav_msgs/msg/odometry.h> // publisher for wheel encoders
-#include <sensor_msgs/msg/imu.h> // publisher for imu
-// #include <sensor_msgs/msg/joint_state.h> // publisher for joint states
+#include <nav_msgs/msg/odometry.h>   // publisher for wheel encoders
+#include <sensor_msgs/msg/imu.h>     // publisher for imu
 #include <std_msgs/msg/int32.h>
 #include <std_msgs/msg/string.h>
 #include <std_msgs/msg/u_int8_multi_array.h>
 
-// #include <geometry_msgs/msg/transform_stamped.h>
 #include <tf2_msgs/msg/tf_message.h>
 
 #include <rosidl_runtime_c/string_functions.h>
@@ -31,13 +29,11 @@
 #include <PN532.h>
 
 // IMU
-#include <Adafruit_MPU6050.h>
-#include <Adafruit_Sensor.h>
 #include <Wire.h>
-#include "I2Cdev.h"
-#include "MPU6050.h"
+#include <I2Cdev.h>
+#include <MPU6050.h>
 
-// wi-fi 
+// wi-fi
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <certs.h>
@@ -47,14 +43,14 @@
 #include "TCA9554.h"
 
 // ================= Robot Parameters and Pins =================
-#define WHEEL_RADIUS 0.045   // meters
+#define WHEEL_RADIUS 0.045 // meters
 #define TRACK_WIDTH 0.51   // meters
 #define MAX_PWM 255
-#define MIN_PWM 0 // for now
-#define MAX_WHEEL_ANGULAR_SPEED 15.71  // rad/s (2 * pi * 150RPM) / 60s
-#define DRIVE_GEAR_REDUCTION 1.0 // no external gears
-#define TICKS_PER_REV 64 // from motor spec sheet
-#define ENCODER_COUNTS_PER_REV 2240 // 64 ticks per rev on motor * 70 gear ratio
+#define MIN_PWM 15
+#define MAX_WHEEL_ANGULAR_SPEED 15.71                                         // rad/s (2 * pi * 150RPM) / 60s
+#define DRIVE_GEAR_REDUCTION 1.0                                              // no external gears
+#define TICKS_PER_REV 64                                                      // from motor spec sheet
+#define ENCODER_COUNTS_PER_REV 2240                                           // 64 ticks per rev on motor * 70 gear ratio
 #define DISTANCE_PER_COUNT (PI * 2 * WHEEL_RADIUS) / (ENCODER_COUNTS_PER_REV) // in meters
 
 // Motor pins
@@ -68,7 +64,7 @@
 #define right_motor_dir_pin_1 12
 #define right_motor_dir_pin_2 14
 #define right_motor_encA 39
-#define right_motor_encB 36 
+#define right_motor_encB 36
 
 // ======================== UART Pins ============================
 #define RPi_RX 16
@@ -94,8 +90,21 @@ hw_timer_t *timer = NULL;
 portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
 
 // ================= micro-ROS & ROS2 Globals =====================
-#define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){error_loop();}}
-#define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){}}
+#define RCCHECK(fn)              \
+  {                              \
+    rcl_ret_t temp_rc = fn;      \
+    if ((temp_rc != RCL_RET_OK)) \
+    {                            \
+      error_loop();              \
+    }                            \
+  }
+#define RCSOFTCHECK(fn)          \
+  {                              \
+    rcl_ret_t temp_rc = fn;      \
+    if ((temp_rc != RCL_RET_OK)) \
+    {                            \
+    }                            \
+  }
 
 rcl_node_t node;
 rclc_support_t support;
@@ -104,12 +113,12 @@ rcl_allocator_t allocator;
 // publisher
 rcl_publisher_t publisher_odom;
 rcl_publisher_t publisher_imu;
-rcl_publisher_t publisher_tf;
+// rcl_publisher_t publisher_tf;
 rcl_publisher_t publisher_rfid_location;
 nav_msgs__msg__Odometry odom_msg;
 sensor_msgs__msg__Imu imu_msg;
-tf2_msgs__msg__TFMessage tf_msg;
-geometry_msgs__msg__TransformStamped odom_tf;
+// tf2_msgs__msg__TFMessage tf_msg;
+// geometry_msgs__msg__TransformStamped odom_tf;
 
 std_msgs__msg__Int32 msg;
 std_msgs__msg__UInt8MultiArray rfid_location_msg;
@@ -121,7 +130,7 @@ rclc_executor_t executor_cmd_vel;
 rcl_timer_t control_timer;
 rcl_timer_t odom_timer;
 rcl_timer_t imu_timer;
-rcl_timer_t tf_timer;
+// rcl_timer_t tf_timer;
 rcl_timer_t rfid_timer;
 
 // subscriber
@@ -132,11 +141,6 @@ geometry_msgs__msg__Twist last_cmd_vel_msg;
 std::mutex cmd_vel_mutex;
 unsigned long last_cmd_time = 0;
 
-// // publisher joint state globals
-// rosidl_runtime_c__String name_data[2];
-// double position_data[2];
-// double velocity_data[2];
-
 // imu stats
 int16_t ax, ay, az;
 int16_t gx, gy, gz;
@@ -146,20 +150,20 @@ volatile int16_t si_gx, si_gy, si_gz;
 unsigned long last_time_odom = 0;
 unsigned long last_time_control = 0;
 
-//final odometric datas
+// final odometric datas
 double x;
 double y;
 double th;
-double v_left; // measured left motor speed
-double v_right; // measured right motor speed
-double vth; // angular velocity of robot
-int32_t deltaLeft; // number of ticks in left encoder since last update
+double v_left;      // measured left motor speed
+double v_right;     // measured right motor speed
+double vth;         // angular velocity of robot
+int32_t deltaLeft;  // number of ticks in left encoder since last update
 int32_t deltaRight; // number of ticks in right encoder since last update
 double dt;
 double delta_distance; // distance moved by robot since last update
-double delta_th; // corresponging change in heading
-double delta_x ; // corresponding change in x direction
-double delta_y; // corresponding change in y direction
+double delta_th;       // corresponging change in heading
+double delta_x;        // corresponding change in x direction
+double delta_y;        // corresponding change in y direction
 
 // encoder pcnt (pulse counters)
 pcnt_unit_t pcnt_unit_left = PCNT_UNIT_0;  // Left motor
@@ -168,19 +172,18 @@ int16_t left_ticks = 0, right_ticks = 0;
 int16_t last_left_ticks = 0, last_right_ticks = 0;
 
 // Define Wheel PID and PID constants
-                  // kp, ki, kd, radius
-Wheel leftWheelPID(0.35, 0, 0, WHEEL_RADIUS);
-Wheel rightWheelPID(0.2, 0, 0, WHEEL_RADIUS);
+// kp, ki, kd, radius
+Wheel leftWheelPID(0.35, 0, 0.05, WHEEL_RADIUS);
+Wheel rightWheelPID(0.15, 0, 0.05, WHEEL_RADIUS);
 
 // RFID
 PN532_HSU pn532hsu(Serial1);
 PN532 nfc(pn532hsu);
-uint8_t rfid_data[16];  // stores the latest read tag
+uint8_t rfid_data[16]; // stores the latest read tag
 bool new_rfid_available = false;
 
 // IMU
-Adafruit_MPU6050 mpu;
-MPU6050 accelgyro; // second imu library
+MPU6050 accelgyro;
 
 // // Wi-Fi
 // static const char * brokerHost = "r38d6e25.ala.us-east-1.emqxsl.com";
@@ -193,22 +196,24 @@ MPU6050 accelgyro; // second imu library
 
 // ================= Utility Functions for Micro-ROS =================
 
-void blinkTask(void *pvParameters) {
-  (void) pvParameters;
+void blinkTask(void *pvParameters)
+{
+  (void)pvParameters;
 
   const int ledPin = 0; // P0 on TCA9554
-  for (;;) {
+  for (;;)
+  {
     TCA.write1(ledPin, HIGH);
-    vTaskDelay(pdMS_TO_TICKS(500));  // wait 500 ms
+    vTaskDelay(pdMS_TO_TICKS(500)); // wait 500 ms
     TCA.write1(ledPin, LOW);
-    vTaskDelay(pdMS_TO_TICKS(500));  // wait 500 ms
+    vTaskDelay(pdMS_TO_TICKS(500)); // wait 500 ms
   }
 }
 
 // Error loop if init fails
-void error_loop() 
+void error_loop()
 {
-  while (1) 
+  while (1)
   {
     delay(100);
     Serial.println("Error");
@@ -216,106 +221,67 @@ void error_loop()
 }
 
 // function to read encoder ticks
-long getEncoderCount(pcnt_unit_t unit) {
+long getEncoderCount(pcnt_unit_t unit)
+{
   int16_t count;
   pcnt_get_counter_value(unit, &count); // Read hardware counter
   return (long)count;                   // Cast to long
 }
 
-void computeOdometry() 
+void computeOdometry()
 {
   left_ticks = getEncoderCount(pcnt_unit_left);
   right_ticks = getEncoderCount(pcnt_unit_right);
 
-  deltaLeft = (int32_t) left_ticks - (int32_t) last_left_ticks;
-  if (deltaLeft > (32768/2)) 
-    deltaLeft -= 32768;      // overflow
-  else if (deltaLeft < -(32768/2)) // underflow
+  deltaLeft = (int32_t)left_ticks - (int32_t)last_left_ticks;
+  if (deltaLeft > (32768 / 2))
+    deltaLeft -= 32768;              // overflow
+  else if (deltaLeft < -(32768 / 2)) // underflow
     deltaLeft += 32768;
-    
-  deltaRight = (int32_t) right_ticks - (int32_t) last_right_ticks;
-  if (deltaRight > (32768/2)) 
-    deltaRight -= 32768;      // overflow
-  else if (deltaRight < -(32768/2)) // underflow
+
+  deltaRight = (int32_t)right_ticks - (int32_t)last_right_ticks;
+  if (deltaRight > (32768 / 2))
+    deltaRight -= 32768;              // overflow
+  else if (deltaRight < -(32768 / 2)) // underflow
     deltaRight += 32768;
 
-  // int32_t deltaLeft = (int32_t) left_ticks - (int32_t)last_left_ticks;
-  // int32_t deltaRight = (int32_t) right_ticks - (int32_t)last_right_ticks;
+  Serial.print("left ticks:");
+  Serial.println(left_ticks);
+  Serial.print("right ticks:");
+  Serial.println(right_ticks);
 
-  // // Handle wraparound for signed 16-bit (-32768 to +32767)
-  // if (deltaLeft > 32767)  deltaLeft -= 65536;
-  // else if (deltaLeft < -32768) deltaLeft += 65536;
+  Serial.print("last left ticks: ");
+  Serial.println(last_left_ticks);
+  Serial.print("last right ticks: ");
+  Serial.println(last_right_ticks);
 
-  // if (deltaRight > 32767)  deltaRight -= 65536;
-  // else if (deltaRight < -32768) deltaRight += 65536;  
-
-  // if (left_ticks > 30000)
-  // {
-  //   left_ticks -= 30000;
-  //   last_left_ticks -= 30000;
-  // }
-
-  // if (right_ticks > 30000)
-  // {
-  //   right_ticks -= 30000;
-  //   last_right_ticks -= 30000;
-  // }
-
-  // if(left_ticks < -30000)
-  // {
-  //   left_ticks += 30000;
-  //   last_left_ticks += 30000;
-  // }
-
-  // if (right_ticks < -30000)
-  // {
-  //   right_ticks += 30000;
-  //   last_right_ticks += 30000;
-  // }
-
-
-  // // Handle overflow (16-bit PCNT range = -32768 to 32767)
-  // if (deltaLeft > 32768 / 2)  deltaLeft -= 65536;
-  // else if (deltaLeft < -32768 / 2) deltaLeft += 65536;
-
-  // if (deltaRight > 32768 / 2) deltaRight -= 65536;
-  // else if (deltaRight < -32768 / 2) deltaRight += 65536;
-
-  Serial.print("left ticks:"); Serial.println(left_ticks);
-
-  Serial.print("right ticks:"); Serial.println(right_ticks);
-
-  Serial.print("last left ticks: ");   Serial.println(last_left_ticks);
-  Serial.print("last right ticks: ");  Serial.println(last_right_ticks);
-
-  // deltaLeft = left_ticks - last_left_ticks;
-  // deltaRight = right_ticks - last_right_ticks;
-
-  Serial.print("deltaLeft: ");   Serial.println(deltaLeft);
-  Serial.print("deltaRight: ");  Serial.println(deltaRight);
+  Serial.print("deltaLeft: ");
+  Serial.println(deltaLeft);
+  Serial.print("deltaRight: ");
+  Serial.println(deltaRight);
 
   unsigned long current_time = millis();
   dt = (current_time - last_time_odom) / 1000.0;
   last_time_odom = current_time;
 
-  v_left = deltaLeft * DISTANCE_PER_COUNT/dt;    // measured speed = m/s 
-  v_right = deltaRight * DISTANCE_PER_COUNT/dt;  // measured speed = m/s
+  v_left = deltaLeft * DISTANCE_PER_COUNT / dt;   // measured speed = m/s
+  v_right = deltaRight * DISTANCE_PER_COUNT / dt; // measured speed = m/s
 
   Serial.print(">v_left:");
   Serial.println(v_left);
   Serial.print(">v_right:");
   Serial.println(v_right);
-  
+
   Serial.printf("v_left: %f, v_right: %f\n", v_left, v_right);
 
   delta_distance = 0.5f * (double)(deltaLeft + deltaRight) * DISTANCE_PER_COUNT;
   // Serial.print("odom delta_distance: ");  Serial.println(delta_distance);
-  
-  delta_th = (double)(deltaRight-deltaLeft)* DISTANCE_PER_COUNT/TRACK_WIDTH;
+
+  delta_th = (double)(deltaRight - deltaLeft) * DISTANCE_PER_COUNT / TRACK_WIDTH;
   // Serial.print("odom delta_th: ");  Serial.println(delta_th);
 
-  delta_x = delta_distance*(double)cos(th);
-  delta_y = delta_distance*(double)sin(th);
+  delta_x = delta_distance * (double)cos(th);
+  delta_y = delta_distance * (double)sin(th);
   // Serial.print("odom delta_x: ");  Serial.println(delta_x);
   // Serial.print("odom delta_y: ");  Serial.println(delta_y);
 
@@ -330,7 +296,7 @@ void computeOdometry()
 }
 
 // ================= ODOM Publisher Callback =================
-void odom_timer_callback(rcl_timer_t * timer, int64_t last_call_time) 
+void odom_timer_callback(rcl_timer_t *timer, int64_t last_call_time)
 {
   RCLC_UNUSED(last_call_time);
 
@@ -338,8 +304,8 @@ void odom_timer_callback(rcl_timer_t * timer, int64_t last_call_time)
 
   // --- Fill Odometry Message ---
   uint64_t now_ms = rmw_uros_epoch_millis();
-  odom_msg.header.stamp.sec = (int32_t) (now_ms / 1000);
-  odom_msg.header.stamp.nanosec = (uint32_t) (now_ms % 1000) * 1000000;
+  odom_msg.header.stamp.sec = (int32_t)(now_ms / 1000);
+  odom_msg.header.stamp.nanosec = (uint32_t)(now_ms % 1000) * 1000000;
 
   rosidl_runtime_c__String__assign(&odom_msg.header.frame_id, "odom");
   rosidl_runtime_c__String__assign(&odom_msg.child_frame_id, "base_link");
@@ -357,25 +323,25 @@ void odom_timer_callback(rcl_timer_t * timer, int64_t last_call_time)
   odom_msg.pose.pose.orientation.z = qz;
   odom_msg.pose.pose.orientation.w = qw;
 
-  double odom_covariances[36] = {0.1, 0, 0, 0, 0, 0, 
-                                  0, 0.1, 0, 0, 0, 0,
-                                  0, 0, 0.1, 0, 0, 0, 
-                                  0, 0, 0, 0.1, 0, 0, 
-                                  0, 0, 0, 0, 0.1, 0, 
-                                  0, 0, 0, 0, 0, 0.1};
+  double odom_covariances[36] = {0.1, 0, 0, 0, 0, 0,
+                                 0, 0.1, 0, 0, 0, 0,
+                                 0, 0, 0.1, 0, 0, 0,
+                                 0, 0, 0, 0.1, 0, 0,
+                                 0, 0, 0, 0, 0.1, 0,
+                                 0, 0, 0, 0, 0, 0.1};
 
   // copy odom covariance matrix into odom_msg cavariance matrix for pose and twist
   std::copy(std::begin(odom_covariances),
-  std::end(odom_covariances),
-  std::begin(odom_msg.pose.covariance));
+            std::end(odom_covariances),
+            std::begin(odom_msg.pose.covariance));
 
   std::copy(std::begin(odom_covariances),
-  std::end(odom_covariances),
-  std::begin(odom_msg.twist.covariance));
+            std::end(odom_covariances),
+            std::begin(odom_msg.twist.covariance));
 
-  odom_msg.twist.twist.linear.x = delta_x/dt;
-  odom_msg.twist.twist.linear.y = delta_y/dt; // added
-  odom_msg.twist.twist.angular.z = delta_th/dt;
+  odom_msg.twist.twist.linear.x = delta_x / dt;
+  odom_msg.twist.twist.linear.y = delta_y / dt; // added
+  odom_msg.twist.twist.angular.z = delta_th / dt;
 
   // Publish
   RCCHECK(rcl_publish(&publisher_odom, &odom_msg, NULL));
@@ -407,11 +373,10 @@ void odom_timer_callback(rcl_timer_t * timer, int64_t last_call_time)
 
   // Publish TF
   // RCCHECK(rcl_publish(&publisher_tf, &tf_msg, NULL));
-
 }
 
 // ================= IMU Publisher Callback =================
-void imu_timer_callback(rcl_timer_t * timer, int64_t last_call_time)
+void imu_timer_callback(rcl_timer_t *timer, int64_t last_call_time)
 {
   RCLC_UNUSED(last_call_time);
 
@@ -423,25 +388,30 @@ void imu_timer_callback(rcl_timer_t * timer, int64_t last_call_time)
 
   // --- Get new sensor events with the readings ---
   accelgyro.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
-  
-  double si_ax = ((double) ax / 16384) * 9.80665;
-  double si_ay = ((double) ay / 16384) * 9.80665;
-  double si_az = ((double) az / 16384) * 9.80665;
 
-  double si_gx = ((double) gx / 131 * M_PI/180);
-  double si_gy = ((double) gy / 131 * M_PI/180);
-  double si_gz = ((double) gz / 131 * M_PI/180);
+  double si_ax = ((double)ax / 16384) * 9.80665;
+  double si_ay = ((double)ay / 16384) * 9.80665;
+  double si_az = ((double)az / 16384) * 9.80665;
 
-  // Serial.print("si acc: ");
-  // Serial.print(si_ax); Serial.print("\t"); 
-  // Serial.print(si_ay); Serial.print("\t");
-  // Serial.println(si_az);
+  double si_gx = ((double)gx / 131 * M_PI / 180);
+  double si_gy = ((double)gy / 131 * M_PI / 180);
+  double si_gz = ((double)gz / 131 * M_PI / 180);
 
-  // Serial.print("si gyro: ");
-  // Serial.print(si_gx); Serial.print("\t");
-  // Serial.print(si_gy); Serial.print("\t");
-  // Serial.println(si_gz); Serial.print("\t");
-  // Serial.println("");
+  Serial.print("si acc: ");
+  Serial.print(si_ax);
+  Serial.print("\t");
+  Serial.print(si_ay);
+  Serial.print("\t");
+  Serial.println(si_az);
+
+  Serial.print("si gyro: ");
+  Serial.print(si_gx);
+  Serial.print("\t");
+  Serial.print(si_gy);
+  Serial.print("\t");
+  Serial.println(si_gz);
+  Serial.print("\t");
+  Serial.println("");
 
   // --- fill angular velocity ---
   imu_msg.angular_velocity.x = si_gx;
@@ -453,59 +423,61 @@ void imu_timer_callback(rcl_timer_t * timer, int64_t last_call_time)
   imu_msg.linear_acceleration.y = si_ay;
   imu_msg.linear_acceleration.z = si_az;
 
-    // --- set covariance matrixes ---
+  // --- set covariance matrixes ---
   double imu_covariances[9] = {0.05, 0, 0,
-                                0, 0.05, 0,
-                                0, 0, 0.05};
+                               0, 0.05, 0,
+                               0, 0, 0.05};
 
   imu_msg.orientation_covariance[0] = -1;
 
   // copy odom covariance matrix into imu_msg cavariance matrix for linear acc and ang vel
   std::copy(std::begin(imu_covariances),
-  std::end(imu_covariances),
-  std::begin(imu_msg.linear_acceleration_covariance));
+            std::end(imu_covariances),
+            std::begin(imu_msg.linear_acceleration_covariance));
 
   std::copy(std::begin(imu_covariances),
-  std::end(imu_covariances),
-  std::begin(imu_msg.angular_velocity_covariance));
+            std::end(imu_covariances),
+            std::begin(imu_msg.angular_velocity_covariance));
 
   // --- Publish ---
   RCCHECK(rcl_publish(&publisher_imu, &imu_msg, NULL));
 }
 
 // setupEncoder for pcnt
-void setupEncoder(pcnt_unit_t unit, int pinA, int pinB) 
+void setupEncoder(pcnt_unit_t unit, int pinA, int pinB)
 {
   pcnt_config_t pcnt_config;
-  
-  pcnt_config.pulse_gpio_num = pinA;        // A channel
-  pcnt_config.ctrl_gpio_num = pinB;         // B channel (direction)
+
+  pcnt_config.pulse_gpio_num = pinA; // A channel
+  pcnt_config.ctrl_gpio_num = pinB;  // B channel (direction)
   pcnt_config.channel = PCNT_CHANNEL_0;
   pcnt_config.unit = unit;
-  
-  pcnt_config.pos_mode = PCNT_COUNT_INC;    // Count up on rising edge of A
-  pcnt_config.neg_mode = PCNT_COUNT_DEC;    // Count down on falling edge of A
+
+  pcnt_config.pos_mode = PCNT_COUNT_INC;      // Count up on rising edge of A
+  pcnt_config.neg_mode = PCNT_COUNT_DEC;      // Count down on falling edge of A
   pcnt_config.lctrl_mode = PCNT_MODE_REVERSE; // Reverse if B HIGH
   pcnt_config.hctrl_mode = PCNT_MODE_KEEP;    // Keep direction if B LOW
 
-  pcnt_config.counter_h_lim = 32767;        // max counter
-  pcnt_config.counter_l_lim = -32768;       // min counter
+  pcnt_config.counter_h_lim = 32767;  // max counter
+  pcnt_config.counter_l_lim = -32768; // min counter
 
-  pcnt_unit_config(&pcnt_config);           // Apply configuration
-  pcnt_counter_clear(unit);                 // Reset counter
-  pcnt_counter_resume(unit);                // Start counting
+  pcnt_unit_config(&pcnt_config); // Apply configuration
+  pcnt_counter_clear(unit);       // Reset counter
+  pcnt_counter_resume(unit);      // Start counting
 }
 
 // Map wheel angular speed (rad/s) to PWM - returns PWM
-int wheel_speed_to_pwm(float omega) 
+int wheel_speed_to_pwm(float omega)
 {
-  if (omega > MAX_WHEEL_ANGULAR_SPEED) omega = MAX_WHEEL_ANGULAR_SPEED;
-  if (omega < -MAX_WHEEL_ANGULAR_SPEED) omega = -MAX_WHEEL_ANGULAR_SPEED;
+  if (omega > MAX_WHEEL_ANGULAR_SPEED)
+    omega = MAX_WHEEL_ANGULAR_SPEED;
+  if (omega < -MAX_WHEEL_ANGULAR_SPEED)
+    omega = -MAX_WHEEL_ANGULAR_SPEED;
   return (int)(abs(omega) / MAX_WHEEL_ANGULAR_SPEED * MAX_PWM);
 }
 
 // Send PWM and direction to motors
-void set_motor_pwm(int left_pwm, int right_pwm, int left_dir, int right_dir) 
+void set_motor_pwm(int left_pwm, int right_pwm, int left_dir, int right_dir)
 {
   digitalWrite(left_motor_dir_pin_1, left_dir);
   digitalWrite(left_motor_dir_pin_2, (!left_dir));
@@ -523,12 +495,12 @@ void stop_motors()
   set_motor_pwm(0, 0, LOW, LOW);
 }
 
-void rfid_timer_callback(rcl_timer_t * timer, int64_t last_call_time)
+void rfid_timer_callback(rcl_timer_t *timer, int64_t last_call_time)
 {
   RCLC_UNUSED(last_call_time);
 
   if (!new_rfid_available)
-    return;  // nothing new to publish
+    return; // nothing new to publish
 
   // Copy global RFID data into message
   memcpy(rfid_location_msg.data.data, rfid_data, 16);
@@ -540,7 +512,7 @@ void rfid_timer_callback(rcl_timer_t * timer, int64_t last_call_time)
 
 // // ================= Joint State Publisher Callback =================
 // void joint_state_timer_callback(rcl_timer_t * timer, int64_t last_call_time)
-// {  
+// {
 //   RCLC_UNUSED(last_call_time);
 
 //   uint64_t now_ms = rmw_uros_epoch_millis();
@@ -581,46 +553,48 @@ void rfid_timer_callback(rcl_timer_t * timer, int64_t last_call_time)
 // }
 
 // ================= Subscriber Callback =================
-void cmd_vel_callback(const void * msgin)
+void cmd_vel_callback(const void *msgin)
 {
-    const geometry_msgs__msg__Twist * msg = (const geometry_msgs__msg__Twist *)msgin;
-    
-    std::lock_guard<std::mutex> lock(cmd_vel_mutex);
-    last_cmd_vel_msg = *msg;
-    last_cmd_time = millis(); // timestamp for timeout
+  const geometry_msgs__msg__Twist *msg = (const geometry_msgs__msg__Twist *)msgin;
+
+  std::lock_guard<std::mutex> lock(cmd_vel_mutex);
+  last_cmd_vel_msg = *msg;
+  last_cmd_time = millis(); // timestamp for timeout
 }
 
-void control_timer_callback(rcl_timer_t * timer, int64_t last_call_time)
+void control_timer_callback(rcl_timer_t *timer, int64_t last_call_time)
 {
   geometry_msgs__msg__Twist cmd_copy;
   {
-      std::lock_guard<std::mutex> lock(cmd_vel_mutex);
-      cmd_copy = last_cmd_vel_msg;
+    std::lock_guard<std::mutex> lock(cmd_vel_mutex);
+    cmd_copy = last_cmd_vel_msg;
   }
 
   // if (millis() - last_cmd_time > 60000) { // 60 seconds
-      //   stop_motors();
-      // return;
+  //   stop_motors();
+  // return;
   // }
 
-  float linear_x  = cmd_copy.linear.x;   // m/s
-  float angular_z = cmd_copy.angular.z;  // rad/s
+  float linear_x = cmd_copy.linear.x;   // m/s
+  float angular_z = cmd_copy.angular.z; // rad/s
 
   // Serial.printf("Received cmd_vel -> linear.x: %.2f, angular.z: %.2f\n", linear_x, angular_z);
 
   // Differential drive formulas - calculate the requested v_left and v_right
-  float req_v_left  = linear_x - (TRACK_WIDTH / 2.0) * angular_z;
+  float req_v_left = linear_x - (TRACK_WIDTH / 2.0) * angular_z;
   float req_v_right = linear_x + (TRACK_WIDTH / 2.0) * angular_z;
 
   // Serial.printf("angular z: %f\n", angular_z);
   // Serial.printf("linear x: %f\n", linear_x);
 
   // Convert to angular velocity
-  float omega_left  = req_v_left / WHEEL_RADIUS;
+  float omega_left = req_v_left / WHEEL_RADIUS;
   float omega_right = req_v_right / WHEEL_RADIUS;
 
-  // Serial.println("omega_left: "); Serial.println(omega_left);
-  // Serial.println("omega_right"); Serial.println(omega_right);
+  Serial.println("omega_left: ");
+  Serial.println(omega_left);
+  Serial.println("omega_right");
+  Serial.println(omega_right);
 
   // Map to PWM - simple diff - original left and right pwm requests
   // int left_pwm  = wheel_speed_to_pwm(omega_left);
@@ -633,19 +607,37 @@ void control_timer_callback(rcl_timer_t * timer, int64_t last_call_time)
   last_time_control = current_time;
 
   // PID controller computes PWM
-  leftWheelPID.curr_pwm  += leftWheelPID.computePWM(req_v_left, v_left, dt_control);
-  rightWheelPID.curr_pwm += rightWheelPID.computePWM(req_v_right, v_right, dt_control);
+  leftWheelPID.curr_pwm += leftWheelPID.computePWM(abs(req_v_left), abs(v_left), dt_control);
+  rightWheelPID.curr_pwm += rightWheelPID.computePWM(abs(req_v_right), abs(v_right), dt_control);
 
-  leftWheelPID.curr_pwm = constrain(leftWheelPID.curr_pwm, 0, 255);
-  rightWheelPID.curr_pwm = constrain(rightWheelPID.curr_pwm, 0, 255);
+  // abs for reverse directions
+  // leftWheelPID.curr_pwm = abs(leftWheelPID.curr_pwm);
+  // rightWheelPID.curr_pwm = abs(rightWheelPID.curr_pwm);
+
+  // constrain so we stay within min and max bounds
+  leftWheelPID.curr_pwm = constrain(leftWheelPID.curr_pwm, 0, MAX_PWM); // changed from 0 to 255
+  rightWheelPID.curr_pwm = constrain(rightWheelPID.curr_pwm, 0, MAX_PWM);
 
   // Determine motor direction
-  int left_dir  = leftWheelPID.getDirection(omega_left);
+  int left_dir = leftWheelPID.getDirection(omega_left);
   int right_dir = rightWheelPID.getDirection(omega_right);
 
+  Serial.print("left_dir: ");
+  Serial.println(left_dir);
+  Serial.print("right_dir: ");
+  Serial.println(right_dir);
+
   // Apply deadband
-  if (leftWheelPID.curr_pwm < MIN_PWM) { leftWheelPID.curr_pwm = 0; left_dir = LOW; }
-  if (rightWheelPID.curr_pwm < MIN_PWM) { rightWheelPID.curr_pwm = 0; right_dir = LOW; }
+  if (leftWheelPID.curr_pwm < MIN_PWM)
+  {
+    leftWheelPID.curr_pwm = 0;
+    left_dir = LOW;
+  } // changed min_pwm from 0 to 3
+  if (rightWheelPID.curr_pwm < MIN_PWM)
+  {
+    rightWheelPID.curr_pwm = 0;
+    right_dir = LOW;
+  }
 
   set_motor_pwm(leftWheelPID.curr_pwm, rightWheelPID.curr_pwm, left_dir, right_dir);
 
@@ -677,33 +669,31 @@ void control_timer_callback(rcl_timer_t * timer, int64_t last_call_time)
   // int left_pwm  = wheel_speed_to_pwm(req_v_left / WHEEL_RADIUS)  + (left_error * drift_gain);
   // int right_pwm = wheel_speed_to_pwm(req_v_right / WHEEL_RADIUS) + (right_error * drift_gain);
 
-//  if (fabs(angular_z) < 0.1 && fabs(linear_x) > 0.05) {
-//     Serial.println("inside straight correction");
-//     // average different in actual wheel speeds for 3 cycles
-//     double angular_vel_diff = v_left - v_right;
-//     Serial.printf("angular_vel_diff: %lf\n", angular_vel_diff);
-//     static double prev_diff = 0;
-//     static double prev_diff2 = 0;
-//     Serial.printf("prev_diff: %lf, prev_diff2: %lf\n", prev_diff, prev_diff2);
-//     double avg_angular_diff = (prev_diff + prev_diff2 + angular_vel_diff) / 3;
-//     Serial.printf("avg_angular_diff: %lf\n", avg_angular_diff);
-//     prev_diff2 = prev_diff;
-//     prev_diff = angular_vel_diff;
+  //  if (fabs(angular_z) < 0.1 && fabs(linear_x) > 0.05) {
+  //     Serial.println("inside straight correction");
+  //     // average different in actual wheel speeds for 3 cycles
+  //     double angular_vel_diff = v_left - v_right;
+  //     Serial.printf("angular_vel_diff: %lf\n", angular_vel_diff);
+  //     static double prev_diff = 0;
+  //     static double prev_diff2 = 0;
+  //     Serial.printf("prev_diff: %lf, prev_diff2: %lf\n", prev_diff, prev_diff2);
+  //     double avg_angular_diff = (prev_diff + prev_diff2 + angular_vel_diff) / 3;
+  //     Serial.printf("avg_angular_diff: %lf\n", avg_angular_diff);
+  //     prev_diff2 = prev_diff;
+  //     prev_diff = angular_vel_diff;
 
-//     // apply correction to each wheel to try and go straight
-//     left_pwm -= (int) (avg_angular_diff * 125); // 125 rad --> 12.5 pwm
-//     right_pwm += (int) (avg_angular_diff * 125); 
-//   }
+  //     // apply correction to each wheel to try and go straight
+  //     left_pwm -= (int) (avg_angular_diff * 125); // 125 rad --> 12.5 pwm
+  //     right_pwm += (int) (avg_angular_diff * 125);
+  //   }
 
-//   if (abs(left_pwm) <= MIN_PWM) left_pwm = 0;
-//   if (abs(right_pwm) <= MIN_PWM) right_pwm = 0;
+  //   if (abs(left_pwm) <= MIN_PWM) left_pwm = 0;
+  //   if (abs(right_pwm) <= MIN_PWM) right_pwm = 0;
 
   // Send to motors
   // Serial.printf("left_pwm * 1.1 : %d", (int)(left_pwm*1.1));
-  
-  // left_pwm *= 1.1; // manual bias the left wheel
-  
 
+  // left_pwm *= 1.1; // manual bias the left wheel
 }
 
 void rfidInitalize()
@@ -711,17 +701,21 @@ void rfidInitalize()
   nfc.begin();
 
   uint32_t versiondata = nfc.getFirmwareVersion();
-  if (! versiondata) 
+  if (!versiondata)
   {
     Serial.print("Didn't find PN53x board");
-    while (1); // halt
+    while (1)
+      ; // halt
   }
 
   // Got ok data, print it out!
-  Serial.print("Found chip PN5"); Serial.println((versiondata>>24) & 0xFF, HEX); 
-  Serial.print("Firmware ver. "); Serial.print((versiondata>>16) & 0xFF, DEC); 
-  Serial.print('.'); Serial.println((versiondata>>8) & 0xFF, DEC);
-  
+  Serial.print("Found chip PN5");
+  Serial.println((versiondata >> 24) & 0xFF, HEX);
+  Serial.print("Firmware ver. ");
+  Serial.print((versiondata >> 16) & 0xFF, DEC);
+  Serial.print('.');
+  Serial.println((versiondata >> 8) & 0xFF, DEC);
+
   // configure board to read RFID tags
   nfc.SAMConfig();
   // RFID Will now be ready to read at anytime
@@ -737,12 +731,12 @@ void imuInitialize()
   Serial.println(accelgyro.testConnection() ? "MPU6050 connection successful" : "MPU6050 connection failed");
 
   // set offsets for calibration
-  accelgyro.setXAccelOffset(-1405.00000);
-  accelgyro.setYAccelOffset(1115.00000);
-  accelgyro.setZAccelOffset(1843.00000);
-  accelgyro.setXGyroOffset(37.00000);
-  accelgyro.setYGyroOffset(-10.00000);
-  accelgyro.setZGyroOffset(36.00000);
+  accelgyro.setXAccelOffset(-4172.00000);
+  accelgyro.setYAccelOffset(-941.00000);
+  accelgyro.setZAccelOffset(396.00000);
+  accelgyro.setXGyroOffset(103.00000);
+  accelgyro.setYGyroOffset(-67.00000);
+  accelgyro.setZGyroOffset(1.00000);
 }
 
 void bootupDelay()
@@ -751,9 +745,9 @@ void bootupDelay()
   unsigned long lastDotTime = millis();
 
   while (millis() - startTime < 45000) // 45 seconds total
-  { 
-    if (millis() - lastDotTime >= 4000)  // every 4 seconds
-    { 
+  {
+    if (millis() - lastDotTime >= 4000) // every 4 seconds
+    {
       Serial.print(".");
       lastDotTime = millis();
     }
@@ -761,7 +755,7 @@ void bootupDelay()
 }
 
 // ======================= Initialization (Setup Function) ========================
-void setup() 
+void setup()
 {
   // Setup motor pins
   pinMode(left_motor_pwm_pin, OUTPUT);
@@ -786,7 +780,7 @@ void setup()
   // Initialize left and right encoders
   setupEncoder(pcnt_unit_left, left_motor_encA, left_motor_encB);
   setupEncoder(pcnt_unit_right, right_motor_encA, right_motor_encB);
-  
+
   // IMU Initialize
   imuInitialize();
 
@@ -795,7 +789,7 @@ void setup()
 
   Serial.println("Waiting for Raspberry Pi to Boot up. ");
   // before connecting delay 20s to wait for RPi Boot up
-  
+
   // bootupDelay();
 
   // Start RPi Serial
@@ -808,46 +802,47 @@ void setup()
   allocator = rcl_get_default_allocator();
 
   // Initialize micro-ROS support
-  if (rclc_support_init(&support, 0, NULL, &allocator) != RCL_RET_OK) 
+  if (rclc_support_init(&support, 0, NULL, &allocator) != RCL_RET_OK)
   {
     error_loop();
   }
 
   // Create node
-  if (rclc_node_init_default(&node, "esp32_node", "", &support) != RCL_RET_OK) 
+  if (rclc_node_init_default(&node, "esp32_node", "", &support) != RCL_RET_OK)
   {
     error_loop();
   }
 
   // Create subscriber to /cmd_vel
   if (rclc_subscription_init_default(
-        &subscriber,
-        &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
-        "cmd_vel") != RCL_RET_OK) {
+          &subscriber,
+          &node,
+          ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
+          "cmd_vel_nav") != RCL_RET_OK)
+  {
     error_loop();
   }
 
-  // create odom publisher 
+  // create odom publisher
   RCCHECK(rclc_publisher_init_default(
-    &publisher_odom,
-    &node,
-    ROSIDL_GET_MSG_TYPE_SUPPORT(nav_msgs, msg, Odometry),
-    "micro_ros_odom_publisher"));
+      &publisher_odom,
+      &node,
+      ROSIDL_GET_MSG_TYPE_SUPPORT(nav_msgs, msg, Odometry),
+      "micro_ros_odom_publisher"));
 
-  // create imu publisher 
+  // create imu publisher
   RCCHECK(rclc_publisher_init_default(
-    &publisher_imu,
-    &node,
-    ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Imu),
-    "imu/data_raw"));
+      &publisher_imu,
+      &node,
+      ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Imu),
+      "imu/data_raw"));
 
-  // create rfid_location publisher 
+  // create rfid_location publisher
   RCCHECK(rclc_publisher_init_default(
-    &publisher_rfid_location,
-    &node,
-    ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String),
-    "rfid_location"));
+      &publisher_rfid_location,
+      &node,
+      ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String),
+      "rfid_location"));
 
   // xSerial.println("before tf publisher");
   // create tf publisher
@@ -860,34 +855,34 @@ void setup()
   // create odom timer,
   const unsigned int timer_timeout_odom = 100;
   RCCHECK(rclc_timer_init_default(
-    &odom_timer,
-    &support,
-    RCL_MS_TO_NS(timer_timeout_odom),
-    odom_timer_callback));
+      &odom_timer,
+      &support,
+      RCL_MS_TO_NS(timer_timeout_odom),
+      odom_timer_callback));
 
   // create imu timer
-  const unsigned int timer_timeout_imu = 1000;
+  const unsigned int timer_timeout_imu = 100;
   RCCHECK(rclc_timer_init_default(
-    &imu_timer,
-    &support,
-    RCL_MS_TO_NS(timer_timeout_imu),
-    imu_timer_callback));
+      &imu_timer,
+      &support,
+      RCL_MS_TO_NS(timer_timeout_imu),
+      imu_timer_callback));
 
   // create rfid_location timer
-  const unsigned int timer_timeout_rfid = 1000;
+  const unsigned int timer_timeout_rfid = 100;
   RCCHECK(rclc_timer_init_default(
-    &rfid_timer,
-    &support,
-    RCL_MS_TO_NS(timer_timeout_rfid),
-    rfid_timer_callback));
+      &rfid_timer,
+      &support,
+      RCL_MS_TO_NS(timer_timeout_rfid),
+      rfid_timer_callback));
 
   // cmd_control timer
   const unsigned int timer_timeout_cmd_control = 100;
   RCCHECK(rclc_timer_init_default(
-    &control_timer,
-    &support,                                 // your rclc support struct
-    RCL_MS_TO_NS(timer_timeout_cmd_control),  
-    control_timer_callback));                 // timer callback
+      &control_timer,
+      &support, // your rclc support struct
+      RCL_MS_TO_NS(timer_timeout_cmd_control),
+      control_timer_callback)); // timer callback
 
   // Create subscriber executor and add subscriber
   RCCHECK(rclc_executor_init(&executor_sub, &support.context, 2, &allocator));
@@ -906,18 +901,17 @@ void setup()
   RCCHECK(rclc_executor_init(&executor_pub_rfid_location, &support.context, 1, &allocator));
 
   msg.data = 0;
-  
+
   Serial.println("Connection to Raspberry Pi Complete!");
 
   // Create a task for blinking
   xTaskCreate(
-    blinkTask,          // Function to run
-    "BlinkTask",        // Task name
-    2048,               // Stack size (in words)
-    NULL,               // Task parameter
-    1,                  // Priority (1 = low, higher = more priority)
-    NULL
-  );
+      blinkTask,   // Function to run
+      "BlinkTask", // Task name
+      2048,        // Stack size (in words)
+      NULL,        // Task parameter
+      1,           // Priority (1 = low, higher = more priority)
+      NULL);
 
   // Turn on LED with IO Expander
   Wire.begin();
@@ -938,125 +932,127 @@ void setup()
 }
 
 // Define state machine
-enum class SystemState {
-        idle,
-        rfid,
-        normalMove,
-        obstacle,
-        rerouting,
-        removePayload
-    };
+enum class SystemState
+{
+  idle,
+  rfid,
+  normalMove,
+  obstacle,
+  rerouting,
+  removePayload
+};
 
-SystemState currentState = SystemState::idle;
+SystemState currentState = SystemState::normalMove;
 
 // ======================= State Machine (loop Function) ========================
-void loop() 
+void loop()
 {
   // Run executor periodically
-  RCCHECK(rclc_executor_spin_some(&executor_sub, RCL_MS_TO_NS(100)));  // (10hz)
-  RCCHECK(rclc_executor_spin_some(&executor_pub_odom, RCL_MS_TO_NS(100)));
-  RCCHECK(rclc_executor_spin_some(&executor_pub_imu, RCL_MS_TO_NS(100)));
+  RCCHECK(rclc_executor_spin_some(&executor_sub, RCL_MS_TO_NS(10)));
+  RCCHECK(rclc_executor_spin_some(&executor_pub_odom, RCL_MS_TO_NS(10)));
+  RCCHECK(rclc_executor_spin_some(&executor_pub_imu, RCL_MS_TO_NS(10)));
 
   uint8_t success;
-  uint8_t uid[] = { 0, 0, 0, 0, 0, 0, 0 };  // Buffer to store the returned UID
-  uint8_t uidLength;                        // Length of the UID (4 or 7 bytes depending on ISO14443A card type)
+  uint8_t uid[] = {0, 0, 0, 0, 0, 0, 0}; // Buffer to store the returned UID
+  uint8_t uidLength;                     // Length of the UID (4 or 7 bytes depending on ISO14443A card type)
 
   uint8_t data[16];
-  uint8_t keya[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+  uint8_t keya[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
   static unsigned long lastTrigger = 0;
   unsigned long now = millis();
   static unsigned long lastPrint = 0;
 
-  // // Payload Detection
-  // int value = analogRead(DETECTOR_PIN);
-
-  // if (value < 1000) 
-  // {
-  //   TCA.write1(DETECTOR_LED, HIGH);
-  //   currentState = SystemState::rfid;
-  // }
-  // else 
-  // {
-  //   currentState = SystemState::idle;
-  //   TCA.write1(DETECTOR_LED, LOW);
-  // }
+  int value = 0;
 
   // State Machine
-  switch(currentState) 
+  switch (currentState)
   {
-    case SystemState::idle: 
-      
-      break;
+  case SystemState::idle:
+    // Payload Detection
+    value = analogRead(DETECTOR_PIN);
 
-    case SystemState::rfid:
-      // Serial.println("PARCEL is waiting for a package.");
+    if (value < 1000)
+    {
+      TCA.write1(DETECTOR_LED, HIGH);
+      currentState = SystemState::rfid;
+    }
+    else
+    {
+      currentState = SystemState::idle;
+      TCA.write1(DETECTOR_LED, LOW);
+    }
+    break;
 
-      success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength);
+  case SystemState::rfid:
+    // Serial.println("PARCEL is waiting for a package.");
 
-        if (success) 
+    success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength);
+
+    if (success)
+    {
+      if (uidLength == 4)
+      {
+        success = nfc.mifareclassic_AuthenticateBlock(uid, uidLength, 4, 0, keya);
+
+        if (success)
         {
-          if (uidLength == 4) 
+          // If you want to write something to block 4 to test with, uncomment
+          // the following line and this text should be read back in a minute
+          // uint8_t data[16] = { 'P', 'a', 'c', 'k', 'a', 'g', 'e', ' ', 'A', ' ', ' ', ' ', ' ', ' ', ' ', ' '};
+
+          // success = nfc.mifareclassic_WriteDataBlock (4, data);
+
+          // Try to read the contents of block 4
+          success = nfc.mifareclassic_ReadDataBlock(4, data);
+
+          if (success)
           {
-            success = nfc.mifareclassic_AuthenticateBlock(uid, uidLength, 4, 0, keya);
-          
-            if (success) 
-            {
-              // If you want to write something to block 4 to test with, uncomment
-              // the following line and this text should be read back in a minute
-              //uint8_t data[16] = { 'P', 'a', 'c', 'k', 'a', 'g', 'e', ' ', 'A', ' ', ' ', ' ', ' ', ' ', ' ', ' '};
-              
-              // success = nfc.mifareclassic_WriteDataBlock (4, data);
+            // Data seems to have been read ... spit it out
+            Serial.println("Reading Package RFID Tag:");
+            nfc.PrintHexChar(data, 16);
+            Serial.println("");
 
-              // Try to read the contents of block 4
-              success = nfc.mifareclassic_ReadDataBlock(4, data);
-          
-              if (success) 
-              {
-                // Data seems to have been read ... spit it out
-                Serial.println("Reading Package RFID Tag:");
-                nfc.PrintHexChar(data, 16);
-                Serial.println("");
+            // Copy the 16 bytes into the global buffer
+            memcpy(rfid_data, data, 16);
+            new_rfid_available = true; // flag for timer to publish
 
-                // Copy the 16 bytes into the global buffer
-                memcpy(rfid_data, data, 16);
-                new_rfid_available = true;  // flag for timer to publish
+            // Move to normalMove
+            Serial.println("Making route to location.");
 
-                // Move to normalMove
-                Serial.println("Making route to location.");
+            // publish to app
 
-                // publish to app 
-
-                // update state
-                currentState = SystemState::normalMove;
-              }
-              else 
-              {
-                Serial.println("Ooops ... unable to read the requested block.  Try another key?");
-              }
-            } else 
-            {
-              Serial.println("Ooops ... authentication failed: Try another key?");
-            }
+            // update state
+            currentState = SystemState::normalMove;
           }
+          else
+          {
+            Serial.println("Ooops ... unable to read the requested block.  Try another key?");
+          }
+        }
+        else
+        {
+          Serial.println("Ooops ... authentication failed: Try another key?");
+        }
+      }
 
       break;
 
     case SystemState::normalMove:
-      
+      // nothing here - just run the executors above to communicate with Raspberry Pi
       break;
 
-    case SystemState::obstacle: 
-        Serial.println("Obstacle detected within range! Set motors to stop!");
-        set_motor_pwm(0, 0, LOW, LOW); // stop motors
-        currentState = SystemState::normalMove;
+    case SystemState::obstacle:
+      Serial.println("Obstacle detected within range! Set motors to stop!");
+      set_motor_pwm(0, 0, LOW, LOW); // stop motors
+      currentState = SystemState::normalMove;
       break;
 
-    case SystemState::rerouting: 
+    case SystemState::rerouting:
       break;
 
-    case SystemState::removePayload: 
+    case SystemState::removePayload:
       break;
-  }
+    }
   }
 }
