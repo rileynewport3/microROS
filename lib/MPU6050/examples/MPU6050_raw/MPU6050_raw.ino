@@ -81,7 +81,7 @@ void setup() {
     // initialize serial communication
     // (38400 chosen because it works as well at 8MHz as it does at 16MHz, but
     // it's really up to you depending on your project)
-    Serial.begin(38400);
+    Serial.begin(115200);
 
     // initialize device
     Serial.println("Initializing I2C devices...");
@@ -92,27 +92,26 @@ void setup() {
     Serial.println(accelgyro.testConnection() ? "MPU6050 connection successful" : "MPU6050 connection failed");
 
     // use the code below to change accel/gyro offset values
-    /*
+
     Serial.println("Updating internal sensor offsets...");
     // -76	-2359	1688	0	0	0
-    Serial.print(accelgyro.getXAccelOffset()); Serial.print("\t"); // -76
-    Serial.print(accelgyro.getYAccelOffset()); Serial.print("\t"); // -2359
-    Serial.print(accelgyro.getZAccelOffset()); Serial.print("\t"); // 1688
-    Serial.print(accelgyro.getXGyroOffset()); Serial.print("\t"); // 0
-    Serial.print(accelgyro.getYGyroOffset()); Serial.print("\t"); // 0
-    Serial.print(accelgyro.getZGyroOffset()); Serial.print("\t"); // 0
-    Serial.print("\n");
-    accelgyro.setXGyroOffset(220);
-    accelgyro.setYGyroOffset(76);
-    accelgyro.setZGyroOffset(-85);
-    Serial.print(accelgyro.getXAccelOffset()); Serial.print("\t"); // -76
-    Serial.print(accelgyro.getYAccelOffset()); Serial.print("\t"); // -2359
-    Serial.print(accelgyro.getZAccelOffset()); Serial.print("\t"); // 1688
-    Serial.print(accelgyro.getXGyroOffset()); Serial.print("\t"); // 0
-    Serial.print(accelgyro.getYGyroOffset()); Serial.print("\t"); // 0
-    Serial.print(accelgyro.getZGyroOffset()); Serial.print("\t"); // 0
-    Serial.print("\n");
-    */
+    // Serial.print(accelgyro.getXAccelOffset()); Serial.print("\t"); // -76
+    // Serial.print(accelgyro.getYAccelOffset()); Serial.print("\t"); // -2359
+    // Serial.print(accelgyro.getZAccelOffset()); Serial.print("\t"); // 1688
+    // Serial.print(accelgyro.getXGyroOffset()); Serial.print("\t"); // 0
+    // Serial.print(accelgyro.getYGyroOffset()); Serial.print("\t"); // 0
+    // Serial.print(accelgyro.getZGyroOffset()); Serial.print("\t"); // 0
+    // Serial.print("\n");
+    // accelgyro.setXGyroOffset(220);
+    // accelgyro.setYGyroOffset(76);
+    // accelgyro.setZGyroOffset(-85);
+    // Serial.print(accelgyro.getXAccelOffset()); Serial.print("\t"); // -76
+    // Serial.print(accelgyro.getYAccelOffset()); Serial.print("\t"); // -2359
+    // Serial.print(accelgyro.getZAccelOffset()); Serial.print("\t"); // 1688
+    // Serial.print(accelgyro.getXGyroOffset()); Serial.print("\t"); // 0
+    // Serial.print(accelgyro.getYGyroOffset()); Serial.print("\t"); // 0
+    // Serial.print(accelgyro.getZGyroOffset()); Serial.print("\t"); // 0
+    // Serial.print("\n");
 
     // configure Arduino LED pin for output
     pinMode(LED_PIN, OUTPUT);
@@ -135,7 +134,30 @@ void loop() {
         Serial.print(gx); Serial.print("\t");
         Serial.print(gy); Serial.print("\t");
         Serial.println(gz);
-    #endif
+
+        double si_ax = ((double)ax / 16384) * 9.80665;
+        double si_ay = ((double)ay / 16384) * 9.80665;
+        double si_az = ((double)az / 16384) * 9.80665;
+
+        double si_gx = ((double)gx / 131 * M_PI / 180);
+        double si_gy = ((double)gy / 131 * M_PI / 180);
+        double si_gz = ((double)gz / 131 * M_PI / 180);
+
+        Serial.print("si:\t");
+        Serial.print(si_ax);
+        Serial.print("\t");
+        Serial.print(si_ay);
+        Serial.print("\t");
+        Serial.print(si_az);
+        Serial.print("\t");
+        Serial.print(si_gx);
+        Serial.print("\t");
+        Serial.print(si_gy);
+        Serial.print("\t");
+        Serial.println(si_gz);
+        Serial.print("\t");
+        Serial.println("");
+#endif
 
     #ifdef OUTPUT_BINARY_ACCELGYRO
         Serial.write((uint8_t)(ax >> 8)); Serial.write((uint8_t)(ax & 0xFF));

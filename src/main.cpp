@@ -495,6 +495,7 @@ void stop_motors()
   set_motor_pwm(0, 0, LOW, LOW);
 }
 
+// ================= RFID Publisher Callback =================
 void rfid_timer_callback(rcl_timer_t *timer, int64_t last_call_time)
 {
   RCLC_UNUSED(last_call_time);
@@ -505,52 +506,11 @@ void rfid_timer_callback(rcl_timer_t *timer, int64_t last_call_time)
   // Copy global RFID data into message
   memcpy(rfid_location_msg.data.data, rfid_data, 16);
   rfid_location_msg.data.size = 16;
+  new_rfid_available = false; // reset flag
 
   // --- Publish ---
   RCCHECK(rcl_publish(&publisher_rfid_location, &rfid_location_msg, NULL));
 }
-
-// // ================= Joint State Publisher Callback =================
-// void joint_state_timer_callback(rcl_timer_t * timer, int64_t last_call_time)
-// {
-//   RCLC_UNUSED(last_call_time);
-
-//   uint64_t now_ms = rmw_uros_epoch_millis();
-//   joint_state_msg.header.stamp.sec = (int32_t) (now_ms / 1000);
-//   joint_state_msg.header.stamp.nanosec = (uint32_t) (now_ms % 1000) * 1000000;
-
-//   rosidl_runtime_c__String__assign(&joint_state_msg.header.frame_id, "joint state");
-
-//   joint_state_msg.name.capacity = 2;
-//   joint_state_msg.name.size = 2;
-//   joint_state_msg.name.data = name_data;
-//   rosidl_runtime_c__String__assign(&joint_state_msg.name.data[0], "left_wheel_joint");
-//   rosidl_runtime_c__String__assign(&joint_state_msg.name.data[1], "right_wheel_joint");
-
-//   joint_state_msg.velocity.capacity = 2;
-//   joint_state_msg.velocity.size = 2;
-//   joint_state_msg.velocity.data = velocity_data;
-
-//   double left_ticks = getEncoderCount(pcnt_unit_left);
-//   double right_ticks = getEncoderCount(pcnt_unit_right);
-//   // Serial.print("left ticks: ");   Serial.println(left_ticks);
-//   // Serial.print("right ticks: ");   Serial.println(right_ticks);
-
-//   double left_angle = (left_ticks / TICKS_PER_REV) * 2.0 * M_PI;
-//   double right_angle = (right_ticks / TICKS_PER_REV) * 2.0 * M_PI;
-//   // Serial.print("left angle: ");   Serial.println(left_angle);
-
-//   // Update wheel joint positions
-//   position_data[0] = left_angle;
-//   position_data[1] = right_angle;
-
-//   joint_state_msg.position.capacity = 2;
-//   joint_state_msg.position.size = 2;
-//   joint_state_msg.position.data = position_data;
-
-//   // --- Publish ---
-//   RCCHECK(rcl_publish(&publisher_joint_state, &joint_state_msg, NULL));
-// }
 
 // ================= Subscriber Callback =================
 void cmd_vel_callback(const void *msgin)
@@ -609,10 +569,6 @@ void control_timer_callback(rcl_timer_t *timer, int64_t last_call_time)
   // PID controller computes PWM
   leftWheelPID.curr_pwm += leftWheelPID.computePWM(abs(req_v_left), abs(v_left), dt_control);
   rightWheelPID.curr_pwm += rightWheelPID.computePWM(abs(req_v_right), abs(v_right), dt_control);
-
-  // abs for reverse directions
-  // leftWheelPID.curr_pwm = abs(leftWheelPID.curr_pwm);
-  // rightWheelPID.curr_pwm = abs(rightWheelPID.curr_pwm);
 
   // constrain so we stay within min and max bounds
   leftWheelPID.curr_pwm = constrain(leftWheelPID.curr_pwm, 0, MAX_PWM); // changed from 0 to 255
@@ -796,10 +752,12 @@ void setup()
   Serial2.begin(115200, SERIAL_8N1, RPi_RX, RPi_TX);
 
   Serial.println("Establishing MicroRos Transport to Raspberry Pi.");
+  
   // Set micro-ROS transport (UART via Serial2)
   set_microros_serial_transports(Serial2);
 
   allocator = rcl_get_default_allocator();
+
 
   // Initialize micro-ROS support
   if (rclc_support_init(&support, 0, NULL, &allocator) != RCL_RET_OK)
@@ -843,14 +801,6 @@ void setup()
       &node,
       ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String),
       "rfid_location"));
-
-  // xSerial.println("before tf publisher");
-  // create tf publisher
-  // RCCHECK(rclc_publisher_init_default(
-  //   &publisher_tf,
-  //   &node,
-  //   ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, TFMessage),
-  //   "tf_custom"));
 
   // create odom timer,
   const unsigned int timer_timeout_odom = 100;
@@ -942,7 +892,7 @@ enum class SystemState
   removePayload
 };
 
-SystemState currentState = SystemState::normalMove;
+SystemState currentState = SystemState::idle;
 
 // ======================= State Machine (loop Function) ========================
 void loop()
@@ -968,91 +918,96 @@ void loop()
   // State Machine
   switch (currentState)
   {
-  case SystemState::idle:
-    // Payload Detection
-    value = analogRead(DETECTOR_PIN);
+    case SystemState::idle:
+      // Payload Detection
+      value = analogRead(DETECTOR_PIN);
 
-    if (value < 1000)
-    {
-      TCA.write1(DETECTOR_LED, HIGH);
-      currentState = SystemState::rfid;
-    }
-    else
-    {
-      currentState = SystemState::idle;
-      TCA.write1(DETECTOR_LED, LOW);
-    }
-    break;
-
-  case SystemState::rfid:
-    // Serial.println("PARCEL is waiting for a package.");
-
-    success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength);
-
-    if (success)
-    {
-      if (uidLength == 4)
+      if (value < 1000)
       {
-        success = nfc.mifareclassic_AuthenticateBlock(uid, uidLength, 4, 0, keya);
+        TCA.write1(DETECTOR_LED, HIGH);
+        currentState = SystemState::rfid;
+      }
+      else
+      {
+        currentState = SystemState::idle;
+        TCA.write1(DETECTOR_LED, LOW);
+      }
+      break;
 
-        if (success)
+    case SystemState::rfid:
+      Serial.println("PARCEL is waiting for a package.");
+
+      success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength);
+
+      if (success)
+      {
+        if (uidLength == 4)
         {
-          // If you want to write something to block 4 to test with, uncomment
-          // the following line and this text should be read back in a minute
-          // uint8_t data[16] = { 'P', 'a', 'c', 'k', 'a', 'g', 'e', ' ', 'A', ' ', ' ', ' ', ' ', ' ', ' ', ' '};
-
-          // success = nfc.mifareclassic_WriteDataBlock (4, data);
-
-          // Try to read the contents of block 4
-          success = nfc.mifareclassic_ReadDataBlock(4, data);
+          success = nfc.mifareclassic_AuthenticateBlock(uid, uidLength, 4, 0, keya);
 
           if (success)
           {
-            // Data seems to have been read ... spit it out
-            Serial.println("Reading Package RFID Tag:");
-            nfc.PrintHexChar(data, 16);
-            Serial.println("");
+            // If you want to write something to block 4 to test with, uncomment
+            // the following line and this text should be read back in a minute
+            // uint8_t data[16] = { 'P', 'a', 'c', 'k', 'a', 'g', 'e', ' ', 'A', ' ', ' ', ' ', ' ', ' ', ' ', ' '};
 
-            // Copy the 16 bytes into the global buffer
-            memcpy(rfid_data, data, 16);
-            new_rfid_available = true; // flag for timer to publish
+            // success = nfc.mifareclassic_WriteDataBlock (4, data);
 
-            // Move to normalMove
-            Serial.println("Making route to location.");
+            // Try to read the contents of block 4
+            success = nfc.mifareclassic_ReadDataBlock(4, data);
 
-            // publish to app
+            if (success)
+            {
+              // Data seems to have been read ... spit it out
+              Serial.println("Reading Package RFID Tag:");
+              nfc.PrintHexChar(data, 16);
+              Serial.println("");
 
-            // update state
-            currentState = SystemState::normalMove;
+              // Copy the 16 bytes into the global buffer
+              memcpy(rfid_data, data, 16);
+              new_rfid_available = true; // flag for timer to publish
+
+              // Move to normalMove
+              Serial.println("Making route to location.");
+
+              // publish to app
+
+              // update state
+              currentState = SystemState::normalMove;
+            }
+            else
+            {
+              Serial.println("Ooops ... unable to read the requested block.  Try another key?");
+            }
           }
           else
           {
-            Serial.println("Ooops ... unable to read the requested block.  Try another key?");
+            Serial.println("Ooops ... authentication failed: Try another key?");
           }
         }
-        else
-        {
-          Serial.println("Ooops ... authentication failed: Try another key?");
-        }
-      }
 
-      break;
+        break;
 
     case SystemState::normalMove:
       // nothing here - just run the executors above to communicate with Raspberry Pi
       break;
 
-    case SystemState::obstacle:
-      Serial.println("Obstacle detected within range! Set motors to stop!");
-      set_motor_pwm(0, 0, LOW, LOW); // stop motors
-      currentState = SystemState::normalMove;
-      break;
-
-    case SystemState::rerouting:
-      break;
-
     case SystemState::removePayload:
-      break;
+        // Payload Detection
+        value = analogRead(DETECTOR_PIN);
+
+        if (value < 1000)
+        {
+          TCA.write1(DETECTOR_LED, HIGH);
+          currentState = SystemState::removePayload; // stay in this state until payload is removed
+        }
+        else
+        {
+          currentState = SystemState::idle; // return to idle state after payload is removed
+          TCA.write1(DETECTOR_LED, LOW);
+        }
+        break;
+      }
     }
   }
-}
+  
